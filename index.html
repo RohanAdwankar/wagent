@@ -91,7 +91,6 @@
 
     let engine = null;
     let pyodide = null;
-    let pyodideInitPromise = null;
     let activePath = null;
     let busy = false;
     let runBusy = false;
@@ -587,27 +586,21 @@
 
     async function ensurePyodide() {
       if (pyodide) return pyodide;
-      if (!pyodideInitPromise) {
-        pyodideInitPromise = (async () => {
-          trace("ensurePyodide:start");
-          if (!window.loadPyodide) {
-            await new Promise((resolve, reject) => {
-              const s = document.createElement("script");
-              s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
-              s.onload = resolve;
-              s.onerror = reject;
-              document.head.appendChild(s);
-            });
-          }
-          pyodide = await window.loadPyodide();
-          trace("ensurePyodide:ready", { version: pyodide?.version || "unknown" });
-          return pyodide;
-        })().catch((err) => {
-          pyodideInitPromise = null;
-          throw err;
+      trace("ensurePyodide:start");
+      setStatus("Loading Pyodide...");
+      if (!window.loadPyodide) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
         });
       }
-      return pyodideInitPromise;
+      pyodide = await window.loadPyodide();
+      trace("ensurePyodide:ready", { version: pyodide?.version || "unknown" });
+      setStatus("Pyodide ready.");
+      return pyodide;
     }
 
     async function runTool(name, args) {
@@ -1335,7 +1328,6 @@ Current workspace snapshot (authoritative): ${snapshot}`
     el.deleteFile.disabled = true;
     trace("app:init", { files: [...files.keys()] });
     trace("app:note", "Only model-visible output can be logged; hidden internal model reasoning is not exposed by WebLLM APIs.");
-    ensurePyodide();
     initEngine();
   </script>
 </body>
