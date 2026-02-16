@@ -64,7 +64,6 @@
   <script type="module">
     import * as webllm from "https://esm.run/@mlc-ai/web-llm";
 
-    // const MODEL = "DeepSeek-R1-Distill-Llama-8B-q4f32_1-MLC";
     const MODEL = "Llama-3.2-1B-Instruct-q4f16_1-MLC";
     const MAX_STEPS = 1000;
     const JSON_MODE_MAX_REPAIR = 3;
@@ -72,7 +71,6 @@
     const REACT_COMPACT_TRIGGER_MESSAGES = 28;
     const REACT_COMPACT_KEEP_TAIL = 14;
     const REACT_COMPACT_KEEP_TAIL_FORCE = 10;
-    const DEBUG_TRACE = true;
 
     const el = {
       tree: document.getElementById("tree"),
@@ -89,20 +87,17 @@
       form: document.getElementById("chat-form")
     };
 
-    const editor = ace.edit("editor");
-    editor.setTheme("ace/theme/monokai");
-    editor.session.setMode("ace/mode/markdown");
-    editor.setOptions({ fontSize: "13px", tabSize: 2, useSoftTabs: true, showPrintMargin: false });
+    const editor = ace.edit("editor", { theme: "ace/theme/monokai", mode: "ace/mode/python", fontSize: "13px", tabSize: 2, useSoftTabs: true, showPrintMargin: false });
 
     let engine = null;
     let pyodide = null;
+    let pyodideInitPromise = null;
     let activePath = null;
     let busy = false;
     let runBusy = false;
     let loadedModel = null;
 
     function trace(label, data) {
-      if (!DEBUG_TRACE) return;
       const ts = new Date().toISOString();
       if (typeof data === "undefined") {
         console.log(`[wagent ${ts}] ${label}`);
@@ -121,18 +116,6 @@
 
     function normalizePath(path) {
       return String(path || "").trim().replace(/^\/+/, "").replace(/\\+/g, "/");
-    }
-
-    function detectAceMode(path) {
-      const p = path.toLowerCase();
-      if (p.endsWith(".py")) return "ace/mode/python";
-      if (p.endsWith(".js") || p.endsWith(".mjs") || p.endsWith(".cjs")) return "ace/mode/javascript";
-      if (p.endsWith(".ts")) return "ace/mode/typescript";
-      if (p.endsWith(".json")) return "ace/mode/json";
-      if (p.endsWith(".html")) return "ace/mode/html";
-      if (p.endsWith(".css")) return "ace/mode/css";
-      if (p.endsWith(".md")) return "ace/mode/markdown";
-      return "ace/mode/text";
     }
 
     function addMessage(role, content) {
@@ -181,7 +164,7 @@
     function openFile(path) {
       activePath = path;
       el.editorPath.textContent = path;
-      editor.session.setMode(detectAceMode(path));
+      editor.session.setMode("ace/mode/python");
       editor.setValue(files.get(path) ?? "", -1);
       el.saveFile.disabled = false;
       el.deleteFile.disabled = false;
@@ -604,21 +587,27 @@
 
     async function ensurePyodide() {
       if (pyodide) return pyodide;
-      trace("ensurePyodide:start");
-      setStatus("Loading Pyodide...");
-      if (!window.loadPyodide) {
-        await new Promise((resolve, reject) => {
-          const s = document.createElement("script");
-          s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
-          s.onload = resolve;
-          s.onerror = reject;
-          document.head.appendChild(s);
+      if (!pyodideInitPromise) {
+        pyodideInitPromise = (async () => {
+          trace("ensurePyodide:start");
+          if (!window.loadPyodide) {
+            await new Promise((resolve, reject) => {
+              const s = document.createElement("script");
+              s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
+              s.onload = resolve;
+              s.onerror = reject;
+              document.head.appendChild(s);
+            });
+          }
+          pyodide = await window.loadPyodide();
+          trace("ensurePyodide:ready", { version: pyodide?.version || "unknown" });
+          return pyodide;
+        })().catch((err) => {
+          pyodideInitPromise = null;
+          throw err;
         });
       }
-      pyodide = await window.loadPyodide();
-      trace("ensurePyodide:ready", { version: pyodide?.version || "unknown" });
-      setStatus("Pyodide ready.");
-      return pyodide;
+      return pyodideInitPromise;
     }
 
     async function runTool(name, args) {
@@ -647,7 +636,7 @@
           return result;
         }
         if (name === "write_file") {
-          const path = resolvePathArg(args);
+          const path = normalizePath(resolvePathArg(args));
           if (!path) {
             const result = JSON.stringify({ ok: false, error: "Invalid path" });
             trace("tool:result", { name, result });
@@ -1269,7 +1258,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
     }
 
     el.newFile.onclick = () => {
-      const path = normalizePath(prompt("New file path", "src/new_file.py") || "");
+      const path = normalizePath(prompt("New file path", "main.py") || "");
       if (!path) return;
       if (!files.has(path)) files.set(path, "");
       renderTree();
@@ -1345,6 +1334,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
     el.deleteFile.disabled = true;
     trace("app:init", { files: [...files.keys()] });
     trace("app:note", "Only model-visible output can be logged; hidden internal model reasoning is not exposed by WebLLM APIs.");
+    ensurePyodide();
     initEngine();
   </script>
 </body>
