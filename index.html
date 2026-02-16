@@ -1,0 +1,1491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>wagent</title>
+  <style>
+    :root {
+      --bg: #0f0f10;
+      --panel: #151516;
+      --panel2: #1c1c1d;
+      --text: #e9e9ea;
+      --muted: #a5a5a8;
+      --line: #2e2e31;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      height: 100vh;
+      overflow: hidden;
+    }
+    #app {
+      display: grid;
+      grid-template-columns: 240px 1fr 380px;
+      height: 100vh;
+      gap: 1px;
+      background: var(--line);
+    }
+    .panel {
+      background: var(--panel);
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .title { font-weight: 600; color: var(--text); }
+    button, input, textarea {
+      font: inherit;
+      color: var(--text);
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      border-radius: 0;
+    }
+    button {
+      padding: 7px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    input {
+      width: 100%;
+      padding: 8px 10px;
+    }
+
+    #tree { overflow: auto; padding: 8px; font-size: 13px; }
+    .node {
+      padding: 5px 8px;
+      border-radius: 0;
+      cursor: pointer;
+      color: var(--text);
+      display: block;
+      text-decoration: none;
+    }
+    .node:hover, .node.active { background: #212938; }
+    .indent-1 { padding-left: 18px; }
+    .indent-2 { padding-left: 30px; }
+    .indent-3 { padding-left: 42px; }
+    .indent-4 { padding-left: 54px; }
+
+    #editor-shell { min-height: 0; display: flex; flex-direction: column; }
+    #editor { width: 100%; min-height: 0; flex: 1; }
+    #editor-controls {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: 8px;
+      align-items: center;
+    }
+    #editor-path {
+      font-size: 12px;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #run-output-shell {
+      border-top: 1px solid var(--line);
+      min-height: 0;
+      max-height: 180px;
+      display: flex;
+      flex-direction: column;
+    }
+    #run-output-header {
+      padding: 6px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--line);
+    }
+    #run-output {
+      margin: 0;
+      padding: 8px 10px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--panel2);
+      color: var(--text);
+    }
+
+    #chat-messages {
+      flex: 1;
+      overflow: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .msg {
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 0;
+      background: var(--panel2);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user { border-color: #2e3f69; background: #162038; }
+    .msg.tool { border-color: #3c345e; background: #211a36; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    #chat-form {
+      border-top: 1px solid var(--line);
+      padding: 10px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+    #prompt { min-height: 82px; max-height: 180px; resize: vertical; padding: 10px; }
+    #status { font-size: 12px; color: var(--muted); padding: 0 10px 8px; }
+    #ascii {
+      margin: 0;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      font-size: 11px;
+      line-height: 1.2;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+  </style>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.3/ace.js"></script>
+</head>
+<body>
+  <div id="app">
+    <section class="panel">
+      <div class="header">
+        <span class="title">Files</span>
+        <button id="new-file">New</button>
+      </div>
+      <div id="tree"></div>
+    </section>
+
+    <section class="panel" id="editor-shell">
+      <div id="editor-controls">
+        <div id="editor-path">No file selected</div>
+        <button id="run-file">Run</button>
+        <button id="save-file" disabled>Save</button>
+        <button id="delete-file" disabled>Delete</button>
+      </div>
+      <div id="editor"></div>
+      <div id="run-output-shell">
+        <div id="run-output-header"></div>
+        <pre id="run-output"></pre>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="header">
+        <span class="title">wagent</span>
+      </div>
+      <div id="chat-messages"></div>
+      <div id="status">Ready.</div>
+      <form id="chat-form">
+        <textarea id="prompt" placeholder="Ask agent to create/edit files or run python..."></textarea>
+        <button id="send" type="submit" disabled>Send</button>
+      </form>
+    </section>
+  </div>
+
+  <script type="module">
+    import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+
+    // const MODEL = "DeepSeek-R1-Distill-Llama-8B-q4f32_1-MLC";
+    const MODEL = "Llama-3.2-1B-Instruct-q4f16_1-MLC";
+    const MAX_STEPS = 1000;
+    const JSON_MODE_MAX_REPAIR = 3;
+    const JSON_MODE_STALL_LIMIT = 8;
+    const REACT_COMPACT_TRIGGER_MESSAGES = 28;
+    const REACT_COMPACT_KEEP_TAIL = 14;
+    const REACT_COMPACT_KEEP_TAIL_FORCE = 10;
+    const DEBUG_TRACE = true;
+
+    const el = {
+      tree: document.getElementById("tree"),
+      newFile: document.getElementById("new-file"),
+      runFile: document.getElementById("run-file"),
+      saveFile: document.getElementById("save-file"),
+      deleteFile: document.getElementById("delete-file"),
+      editorPath: document.getElementById("editor-path"),
+      runOutput: document.getElementById("run-output"),
+      send: document.getElementById("send"),
+      prompt: document.getElementById("prompt"),
+      messages: document.getElementById("chat-messages"),
+      status: document.getElementById("status"),
+      form: document.getElementById("chat-form")
+    };
+
+    const editor = ace.edit("editor");
+    editor.setTheme("ace/theme/monokai");
+    editor.session.setMode("ace/mode/markdown");
+    editor.setOptions({ fontSize: "13px", tabSize: 2, useSoftTabs: true, showPrintMargin: false });
+
+    let engine = null;
+    let pyodide = null;
+    let activePath = null;
+    let busy = false;
+    let runBusy = false;
+    let loadedModel = null;
+
+    function trace(label, data) {
+      if (!DEBUG_TRACE) return;
+      const ts = new Date().toISOString();
+      if (typeof data === "undefined") {
+        console.log(`[wagent ${ts}] ${label}`);
+        return;
+      }
+      console.log(`[wagent ${ts}] ${label}`, data);
+    }
+
+    const files = new Map();
+
+    function setStatus(text) { el.status.textContent = text; }
+    function setBusy(state) {
+      busy = state;
+      el.send.disabled = state || !engine;
+    }
+
+    function normalizePath(path) {
+      return String(path || "").trim().replace(/^\/+/, "").replace(/\\+/g, "/");
+    }
+
+    function detectAceMode(path) {
+      const p = path.toLowerCase();
+      if (p.endsWith(".py")) return "ace/mode/python";
+      if (p.endsWith(".js") || p.endsWith(".mjs") || p.endsWith(".cjs")) return "ace/mode/javascript";
+      if (p.endsWith(".ts")) return "ace/mode/typescript";
+      if (p.endsWith(".json")) return "ace/mode/json";
+      if (p.endsWith(".html")) return "ace/mode/html";
+      if (p.endsWith(".css")) return "ace/mode/css";
+      if (p.endsWith(".md")) return "ace/mode/markdown";
+      return "ace/mode/text";
+    }
+
+    function addMessage(role, content) {
+      const d = document.createElement("div");
+      d.className = `msg ${role}`;
+      d.textContent = content;
+      el.messages.appendChild(d);
+      el.messages.scrollTop = el.messages.scrollHeight;
+    }
+
+    function buildTree(paths) {
+      const root = {};
+      for (const full of paths) {
+        const parts = full.split("/");
+        let cur = root;
+        parts.forEach((part, i) => {
+          if (!cur[part]) cur[part] = { __children: {}, __file: false };
+          if (i === parts.length - 1) cur[part].__file = true;
+          cur = cur[part].__children;
+        });
+      }
+      return root;
+    }
+
+    function renderTree() {
+      const tree = buildTree([...files.keys()].sort());
+      el.tree.innerHTML = "";
+
+      function walk(node, prefix = "", depth = 0) {
+        Object.keys(node).sort().forEach((name) => {
+          const item = node[name];
+          const path = prefix ? `${prefix}/${name}` : name;
+          const row = document.createElement("a");
+          row.className = `node indent-${Math.min(depth, 4)}` + (activePath === path ? " active" : "");
+          row.textContent = item.__file ? name : `${name}/`;
+          if (item.__file) {
+            row.onclick = () => openFile(path);
+          }
+          el.tree.appendChild(row);
+          walk(item.__children, path, depth + 1);
+        });
+      }
+      walk(tree);
+    }
+
+    function openFile(path) {
+      activePath = path;
+      el.editorPath.textContent = path;
+      editor.session.setMode(detectAceMode(path));
+      editor.setValue(files.get(path) ?? "", -1);
+      el.saveFile.disabled = false;
+      el.deleteFile.disabled = false;
+      renderTree();
+    }
+
+    function listDir(path = "") {
+      const prefix = normalizePath(path);
+      const out = [];
+      const seen = new Set();
+      for (const p of files.keys()) {
+        if (prefix && !(p === prefix || p.startsWith(prefix + "/"))) continue;
+        const rem = prefix ? p.slice(prefix.length).replace(/^\//, "") : p;
+        const first = rem.split("/")[0];
+        if (!first) continue;
+        const full = prefix ? `${prefix}/${first}` : first;
+        if (seen.has(full)) continue;
+        seen.add(full);
+        const isDir = [...files.keys()].some((k) => k.startsWith(full + "/"));
+        out.push({ name: first, path: full, type: isDir ? "dir" : "file" });
+      }
+      return out.sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    function workspaceSnapshot() {
+      const entries = [...files.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([path, content]) => ({ path, content }));
+      return JSON.stringify({ files: entries });
+    }
+
+    function firstString(...vals) {
+      for (const v of vals) {
+        if (typeof v === "string" && v.trim()) return v;
+      }
+      return "";
+    }
+
+    function resolvePathArg(args = {}) {
+      return normalizePath(firstString(args.path, args.file, args.file_path, args.input_file, args.filename));
+    }
+
+    function normalizeToolName(rawName, args = {}) {
+      const name = String(rawName || "").trim();
+      const allowed = new Set(["list_files", "read_file", "write_file", "run_python", "complete"]);
+      if (allowed.has(name)) return name;
+
+      if (/create[_\s-]?file/i.test(name) && resolvePathArg(args)) return "write_file";
+
+      const parts = name.split(/[|,/\s]+/).map((p) => p.trim()).filter(Boolean);
+      const validParts = parts.filter((p) => allowed.has(p));
+      if (validParts.length === 1) return validParts[0];
+      if (validParts.length > 1) {
+        if (typeof args?.message === "string") return "complete";
+        if (typeof args?.content === "string") return "write_file";
+        if (typeof args?.code === "string" || typeof args?.command === "string") return "run_python";
+        const path = resolvePathArg(args);
+        if (path.toLowerCase().endsWith(".py")) return "run_python";
+        if (path) return "read_file";
+        return validParts[0];
+      }
+      return name;
+    }
+
+    function sanitizeToolArgs(toolName, rawArgs = {}) {
+      const args = rawArgs && typeof rawArgs === "object" ? rawArgs : {};
+      const path = resolvePathArg(args);
+
+      if (toolName === "list_files") {
+        return { path: normalizePath(firstString(args.path, args.dir, args.directory, args.input_file)) };
+      }
+      if (toolName === "read_file") {
+        return { path };
+      }
+      if (toolName === "write_file") {
+        return { path, content: String(firstString(args.content, args.code) || "") };
+      }
+      if (toolName === "run_python") {
+        const command = firstString(args.command);
+        const code = firstString(args.code, args.content);
+        const out = {};
+        if (path) out.path = path;
+        if (code) out.code = code;
+        if (command) out.command = command;
+        return out;
+      }
+      if (toolName === "complete") {
+        return { message: String(firstString(args.message, args.summary, args.final) || "Done.") };
+      }
+      return args;
+    }
+
+    function normalizeToolCallForWorkspace(toolName, toolArgs) {
+      const args = sanitizeToolArgs(toolName, toolArgs);
+      return { toolName, toolArgs: args, note: "" };
+    }
+
+    function summarizeRunResult(path, output) {
+      let summary = `Ran ${path}.`;
+      try {
+        const parsed = JSON.parse(output);
+        if (parsed?.ok) {
+          const stdout = String(parsed.stdout || "").trim();
+          const stderr = String(parsed.stderr || "").trim();
+          if (stdout) summary = `Ran ${path}. Output:\n${stdout}`;
+          else if (stderr) summary = `Ran ${path}. stderr:\n${stderr}`;
+          else summary = `Ran ${path} successfully with no output.`;
+        } else {
+          const err = String(parsed?.error || "").trim();
+          const stderr = String(parsed?.stderr || "").trim();
+          if (err) summary = `Failed to run ${path}: ${err}`;
+          else if (stderr) summary = `Failed to run ${path}. stderr:\n${stderr}`;
+          else summary = `Failed to run ${path}.`;
+        }
+      } catch {}
+      return summary;
+    }
+
+    function formatRunPythonToolDisplay(args, output) {
+      const path = resolvePathArg(args);
+      const command = firstString(args?.command);
+      const runCmd = command || (path ? `python ${path}` : "python <code>");
+
+      let lines = [];
+      try {
+        const parsed = JSON.parse(output);
+        const stdout = String(parsed?.stdout || "");
+        const stderr = String(parsed?.stderr || "");
+        const err = String(parsed?.error || "");
+
+        if (parsed?.ok === false) {
+          lines.push(`> ERROR: ${err || stderr || "execution failed"}`);
+        } else {
+          const outLines = stdout.split("\n").filter((l) => l.length > 0);
+          if (outLines.length) {
+            lines.push(...outLines.map((line) => `> ${JSON.stringify(line)}`));
+          }
+          if (stderr.trim()) {
+            lines.push(...stderr.split("\n").filter((l) => l.length > 0).map((line) => `> STDERR: ${JSON.stringify(line)}`));
+          }
+        }
+      } catch {
+        lines.push(`> ${output}`);
+      }
+
+      if (!lines.length) lines.push("> (no output)");
+      return `% ${runCmd}\n${lines.join("\n")}`;
+    }
+
+    function formatToolDisplay(name, args, output) {
+      if (name === "run_python") {
+        return formatRunPythonToolDisplay(args || {}, output);
+      }
+      return `${name}(${JSON.stringify(args || {})})\n${output}`;
+    }
+
+    function setRunOutput(path, output) {
+      const header = `% python ${path}`;
+      try {
+        const parsed = JSON.parse(output);
+        if (parsed?.ok === false) {
+          const msg = String(parsed?.error || parsed?.stderr || "execution failed").trim();
+          el.runOutput.textContent = `${header}\n${msg || "execution failed"}`;
+          return;
+        }
+
+        const stdout = String(parsed?.stdout || "");
+        const stderr = String(parsed?.stderr || "");
+        const lines = [header];
+        if (stdout.trim()) lines.push(stdout.trimEnd());
+        if (stderr.trim()) lines.push(`stderr:\n${stderr.trimEnd()}`);
+        if (!stdout.trim() && !stderr.trim()) lines.push("(no output)");
+        el.runOutput.textContent = lines.join("\n\n");
+      } catch {
+        el.runOutput.textContent = `${header}\n${String(output || "")}`;
+      }
+    }
+
+    function detectRunTarget(userText) {
+      const text = String(userText || "").trim();
+      const hasMutationIntent = /\b(edit|write|create|modify|update|add|implement|refactor)\b/i.test(text);
+      const explicit = text.match(/^\s*run\s+([^\s]+\.py)\s*$/i);
+      if (explicit) return normalizePath(explicit[1]);
+
+      const hasRunIntent = /\b(run|execute)\b/i.test(text);
+      const refersToFile = /\b(file|script|python)\b/i.test(text);
+      if (hasMutationIntent || !hasRunIntent || !refersToFile) return "";
+
+      const pyFiles = [...files.keys()].filter((p) => p.toLowerCase().endsWith(".py"));
+      if (pyFiles.length === 1) return pyFiles[0];
+      return "";
+    }
+
+
+    function stripWrappingQuotes(value) {
+      const s = String(value || "").trim();
+      if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+        return s.slice(1, -1);
+      }
+      return s;
+    }
+
+    function splitTopLevelArgs(rawArgs) {
+      const src = String(rawArgs || "").trim();
+      if (!src) return [];
+      const out = [];
+      let cur = "";
+      let depth = 0;
+      let inString = false;
+      let quote = "";
+      let escaped = false;
+
+      for (let i = 0; i < src.length; i++) {
+        const ch = src[i];
+        if (inString) {
+          cur += ch;
+          if (escaped) {
+            escaped = false;
+            continue;
+          }
+          if (ch === "\\") {
+            escaped = true;
+            continue;
+          }
+          if (ch === quote) {
+            inString = false;
+            quote = "";
+          }
+          continue;
+        }
+
+        if (ch === '"' || ch === "'") {
+          inString = true;
+          quote = ch;
+          cur += ch;
+          continue;
+        }
+
+        if (ch === "(" || ch === "[" || ch === "{") {
+          depth += 1;
+          cur += ch;
+          continue;
+        }
+        if (ch === ")" || ch === "]" || ch === "}") {
+          if (depth > 0) depth -= 1;
+          cur += ch;
+          continue;
+        }
+
+        if (ch === "," && depth === 0) {
+          out.push(cur.trim());
+          cur = "";
+          continue;
+        }
+
+        cur += ch;
+      }
+
+      if (cur.trim()) out.push(cur.trim());
+      return out;
+    }
+
+    function mapSimpleToolName(rawName) {
+      const n = String(rawName || "").trim().toLowerCase();
+      if (n === "list_files" || n === "list") return "list_files";
+      if (n === "read_file" || n === "read") return "read_file";
+      if (n === "create_file" || n === "create") return "write_file";
+      if (n === "write_file" || n === "write") return "write_file";
+      if (n === "run_python" || n === "run") return "run_python";
+      if (n === "complete" || n === "done") return "complete";
+      return "";
+    }
+
+    function parseSimpleToolCallLine(line, impliedPath = "main.py") {
+      let candidate = String(line || "").trim();
+      if (!candidate) return null;
+
+      candidate = candidate.replace(/^NEXT_TOOL_(?:CALL|JSON)\s*:\s*/i, "").trim();
+      candidate = candidate.replace(/^FOLLOWED\s+BY\s*:\s*/i, "").trim();
+      candidate = candidate.replace(/^CALL\s*:\s*/i, "").trim();
+
+      const match = candidate.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$/);
+      if (!match) return null;
+
+      const mappedTool = mapSimpleToolName(match[1]);
+      if (!mappedTool) return null;
+
+      const argsList = splitTopLevelArgs(match[2] || "");
+      const defaultPath = normalizePath(impliedPath || activePath || "main.py") || "main.py";
+      const first = stripWrappingQuotes(argsList[0] || "");
+      const restJoined = stripWrappingQuotes(argsList.slice(1).join(",").trim());
+
+      if (mappedTool === "list_files") {
+        return { tool: "list_files", args: { path: normalizePath(first) } };
+      }
+      if (mappedTool === "read_file") {
+        return { tool: "read_file", args: { path: normalizePath(first || defaultPath) } };
+      }
+      if (mappedTool === "write_file") {
+        if (!argsList.length) return null;
+        if (argsList.length === 1) {
+          return { tool: "write_file", args: { path: defaultPath, content: stripWrappingQuotes(argsList[0]) } };
+        }
+        return { tool: "write_file", args: { path: normalizePath(first), content: restJoined } };
+      }
+      if (mappedTool === "run_python") {
+        if (!argsList.length) return { tool: "run_python", args: { path: defaultPath } };
+        const val = stripWrappingQuotes(argsList.join(",").trim());
+        if (/^python(?:3)?\s+/i.test(val)) return { tool: "run_python", args: { command: val } };
+        if (/\.py$/i.test(val)) return { tool: "run_python", args: { path: normalizePath(val) } };
+        return { tool: "run_python", args: { code: val } };
+      }
+      if (mappedTool === "complete") {
+        return { tool: "complete", args: { message: stripWrappingQuotes(argsList.join(",").trim()) || "Done." } };
+      }
+
+      return null;
+    }
+
+    function parseSimpleToolCall(text, impliedPath = "main.py") {
+      const source = String(text || "").trim();
+      if (!source) return null;
+
+      const fence = source.match(/```(?:json|text)?\s*([\s\S]*?)```/i);
+      const raw = (fence ? fence[1] : source).trim();
+      const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const parsed = parseSimpleToolCallLine(lines[i], impliedPath);
+        if (parsed) return parsed;
+      }
+      const parsedRaw = parseSimpleToolCallLine(raw, impliedPath);
+      if (parsedRaw) return parsedRaw;
+      return null;
+    }
+
+    function parseToolCallResponse(text, impliedPath = "main.py") {
+      const asJson = extractJsonObject(text);
+      if (asJson && typeof asJson === "object" && asJson.tool) return asJson;
+      return parseSimpleToolCall(text, impliedPath);
+    }
+
+    function extractCodeBlock(text) {
+      const src = String(text || "");
+      const pyFence = src.match(/```python\s*([\s\S]*?)```/i);
+      if (pyFence && pyFence[1]) return String(pyFence[1]).trim();
+      const anyFence = src.match(/```\s*([\s\S]*?)```/i);
+      if (anyFence && anyFence[1]) return String(anyFence[1]).trim();
+
+      const pyFenceOpenOnly = src.match(/```python\s*([\s\S]*)$/i);
+      if (pyFenceOpenOnly && pyFenceOpenOnly[1]) return String(pyFenceOpenOnly[1]).trim();
+      const anyFenceOpenOnly = src.match(/```\s*([\s\S]*)$/i);
+      if (anyFenceOpenOnly && anyFenceOpenOnly[1]) return String(anyFenceOpenOnly[1]).trim();
+
+      const lines = src.split(/\r?\n/);
+      const codeish = lines.filter((line) => {
+        const l = String(line || "");
+        return /^\s*(def\s+|class\s+|import\s+|from\s+|if\s+__name__\s*==\s*["']__main__["']\s*:|for\s+|while\s+|return\s+|print\(|[A-Za-z_][A-Za-z0-9_]*\s*=)/.test(l)
+          || /^\s*$/.test(l);
+      });
+      if (codeish.length >= 3) {
+        const candidate = codeish.join("\n").trim();
+        if (candidate) return candidate;
+      }
+      return "";
+    }
+
+    function extractLikelyPythonPath(text, fallback = "main.py") {
+      const m = String(text || "").match(/\b([\w./-]+\.py)\b/i);
+      if (m && m[1]) return normalizePath(m[1]);
+      return normalizePath(fallback || "main.py") || "main.py";
+    }
+
+    function compactReactMessagesInPlace(messages, force = false) {
+      if (!Array.isArray(messages) || messages.length <= 2) return false;
+      if (!force && messages.length < REACT_COMPACT_TRIGGER_MESSAGES) return false;
+
+      const head = messages.slice(0, 2);
+      const keepTail = force ? REACT_COMPACT_KEEP_TAIL_FORCE : REACT_COMPACT_KEEP_TAIL;
+      const tailStart = Math.max(2, messages.length - keepTail);
+      const tail = messages.slice(tailStart);
+      messages.length = 0;
+      messages.push(...head, ...tail);
+      return true;
+    }
+
+    function workspaceDigest() {
+      return JSON.stringify([...files.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+    }
+
+    function extractAnswerFromReact(text) {
+      const src = String(text || "");
+      const lines = src.split(/\r?\n/);
+      for (const line of lines) {
+        const m = line.match(/^Answer:\s*(.*)$/i);
+        if (m) return String(m[1] || "").trim();
+      }
+      return "";
+    }
+
+
+    function ensurePyodideDir(py, dirPath) {
+      const parts = String(dirPath || "").split("/").filter(Boolean);
+      let cur = "";
+      for (const part of parts) {
+        cur += `/${part}`;
+        try {
+          py.FS.mkdir(cur);
+        } catch {}
+      }
+    }
+
+    function syncWorkspaceToPyodide(py) {
+      for (const [pathRaw, content] of files.entries()) {
+        const path = normalizePath(pathRaw);
+        const dir = path.split("/").slice(0, -1).join("/");
+        if (dir) ensurePyodideDir(py, dir);
+        py.FS.writeFile(`/${path}`, String(content ?? ""), { encoding: "utf8" });
+      }
+    }
+
+    async function ensurePyodide() {
+      if (pyodide) return pyodide;
+      trace("ensurePyodide:start");
+      setStatus("Loading Pyodide...");
+      if (!window.loadPyodide) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+      }
+      pyodide = await window.loadPyodide();
+      trace("ensurePyodide:ready", { version: pyodide?.version || "unknown" });
+      setStatus("Pyodide ready.");
+      return pyodide;
+    }
+
+    async function runTool(name, args) {
+      trace("tool:call", { name, args });
+      try {
+        if (name === "list_files") {
+          const path = normalizePath(firstString(args.path, args.dir, args.directory, args.input_file));
+          if (path && files.has(path)) {
+            const result = JSON.stringify({ ok: true, entries: [{ name: path.split("/").pop(), path, type: "file" }] });
+            trace("tool:result", { name, result });
+            return result;
+          }
+          const result = JSON.stringify({ ok: true, entries: listDir(path) });
+          trace("tool:result", { name, result });
+          return result;
+        }
+        if (name === "read_file") {
+          const path = resolvePathArg(args);
+          if (!files.has(path)) {
+            const result = JSON.stringify({ ok: false, error: "File not found" });
+            trace("tool:result", { name, result });
+            return result;
+          }
+          const result = JSON.stringify({ ok: true, path, content: files.get(path) });
+          trace("tool:result", { name, result });
+          return result;
+        }
+        if (name === "write_file") {
+          const path = resolvePathArg(args);
+          if (!path) {
+            const result = JSON.stringify({ ok: false, error: "Invalid path" });
+            trace("tool:result", { name, result });
+            return result;
+          }
+          files.set(path, String(args.content ?? ""));
+          openFile(path);
+          const result = JSON.stringify({ ok: true, path, bytes: files.get(path).length });
+          trace("tool:result", { name, result });
+          return result;
+        }
+        if (name === "run_python") {
+          const py = await ensurePyodide();
+          syncWorkspaceToPyodide(py);
+          let code = String(args.code ?? "");
+          let runPath = "";
+          const directPath = resolvePathArg(args);
+          if (directPath && files.has(directPath)) {
+            runPath = directPath;
+          }
+          if (!code.trim()) {
+            if (runPath) {
+              code = String(files.get(runPath) ?? "");
+            }
+          }
+          if (!code.trim()) {
+            const command = String(args.command ?? "").trim();
+            const cmdMatch = command.match(/^python(?:3)?\s+(.+)$/i);
+            if (cmdMatch) {
+              const path = normalizePath(cmdMatch[1]);
+              if (files.has(path)) {
+                runPath = path;
+                code = String(files.get(path) ?? "");
+              }
+            }
+          }
+          if (!code.trim()) {
+            const result = JSON.stringify({ ok: false, error: "run_python requires code, path, or python command" });
+            trace("tool:result", { name, result });
+            return result;
+          }
+          trace("tool:run_python:code", code);
+          py.globals.set("__code", code);
+          py.globals.set("__run_path", runPath ? `/${runPath}` : "");
+          const result = await py.runPythonAsync(`
+      import textwrap
+      _runner = textwrap.dedent("""
+      import io, sys, traceback, runpy
+      import builtins
+      _out = io.StringIO()
+      _err = io.StringIO()
+      _old_out, _old_err = sys.stdout, sys.stderr
+      _old_input = builtins.input
+      sys.stdout, sys.stderr = _out, _err
+      val = None
+      ok = True
+      try:
+        builtins.input = lambda prompt='': (print(prompt, end='') or '')
+        if '/' not in sys.path:
+          sys.path.insert(0, '/')
+        if __run_path:
+          ns = runpy.run_path(__run_path, run_name='__main__')
+          val = ns.get('_', None) if isinstance(ns, dict) else None
+        else:
+          ns = {}
+          exec(__code, ns)
+          val = ns.get('_', None)
+      except Exception:
+        ok = False
+        traceback.print_exc()
+      finally:
+        builtins.input = _old_input
+        sys.stdout, sys.stderr = _old_out, _old_err
+      __wagent_payload = {'ok': ok, 'stdout': _out.getvalue(), 'stderr': _err.getvalue(), 'result': repr(val)}
+      """)
+      exec(_runner)
+      __wagent_payload
+          `);
+          const payload = JSON.stringify(result.toJs ? result.toJs() : result);
+          trace("tool:result", { name, result: payload });
+          return payload;
+        }
+        if (name === "complete") {
+          const message = firstString(args.message, args.summary, args.final) || "Done.";
+          const result = JSON.stringify({ ok: true, done: true, message });
+          trace("tool:result", { name, result });
+          return result;
+        }
+        const result = JSON.stringify({ ok: false, error: `Unknown tool ${name}` });
+        trace("tool:result", { name, result });
+        return result;
+      } catch (err) {
+        const result = JSON.stringify({ ok: false, error: String(err?.message || err) });
+        trace("tool:error", { name, args, error: err, result });
+        return result;
+      }
+    }
+
+    async function runAgent(userText) {
+      trace("agent:start", { userText, model: loadedModel, mode: "react-tool-mode" });
+
+      const runTarget = detectRunTarget(userText);
+      if (runTarget) {
+        const path = runTarget;
+        trace("agent:quick-run", { path });
+        const output = await runTool("run_python", { path });
+        addMessage("tool", formatToolDisplay("run_python", { path }, output));
+        const summary = summarizeRunResult(path, output);
+        addMessage("assistant", summary);
+        setStatus("Done.");
+        return;
+      }
+
+      trace("agent:dispatch", "Using ReAct tool mode");
+      return runAgentReactToolMode(userText);
+    }
+
+    function extractJsonObject(text) {
+      const source = String(text || "").trim();
+      const fence = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      const raw = (fence ? fence[1] : source).trim();
+      try {
+        return JSON.parse(raw);
+      } catch {
+        const start = raw.indexOf("{");
+        const end = raw.lastIndexOf("}");
+        if (start >= 0 && end > start) {
+          try { return JSON.parse(raw.slice(start, end + 1)); } catch {}
+        }
+      }
+      const candidates = [];
+      let depth = 0;
+      let start = -1;
+      let inString = false;
+      let escaped = false;
+      for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (ch === "\\") escaped = true;
+          else if (ch === '"') inString = false;
+          continue;
+        }
+        if (ch === '"') {
+          inString = true;
+          continue;
+        }
+        if (ch === "{") {
+          if (depth === 0) start = i;
+          depth += 1;
+        } else if (ch === "}") {
+          if (depth > 0) depth -= 1;
+          if (depth === 0 && start >= 0) {
+            candidates.push(raw.slice(start, i + 1));
+            start = -1;
+          }
+        }
+      }
+      for (const cand of candidates) {
+        try {
+          const parsed = JSON.parse(cand);
+          if (parsed && typeof parsed === "object") return parsed;
+        } catch {}
+      }
+      return null;
+    }
+
+    async function runAgentReactToolMode(userText) {
+      trace("agent-react:start", { userText, model: loadedModel });
+      const snapshot = workspaceSnapshot();
+      const messages = [
+        {
+          role: "system",
+          content:
+            `You are wagent, a ReAct coding agent. Follow this loop strictly:
+Thought: <brief reasoning>
+Action: <TOOL(args)>
+After any Action, wait for Observation and continue.
+Do not output JSON.
+Do not output multiple Action lines.
+On every step, include a Thought line that considers the latest Observation and decides whether to continue or finish.
+When finished, end by calling Action: COMPLETE(message).
+
+Available tools:
+- LIST_FILES(path?)
+- READ_FILE(path)
+- WRITE_FILE(path,content)  (single file tool; create new file by writing a new path; overwrite if path exists)
+- WRITE_FILE(content)  (writes to current/last path)
+- RUN_PYTHON(path_or_code)
+- COMPLETE(message)
+
+Behavior requirements:
+- For coding requests, create/update files with WRITE_FILE, and run with RUN_PYTHON when execution is requested.
+- If no files exist, create a new .py file using WRITE_FILE(main.py,<content>) before running.
+- If you WRITE_FILE a Python file (.py), your next action should usually be RUN_PYTHON on that file before COMPLETE.
+- Prefer non-interactive scripts; avoid input() unless the user explicitly asks for interactive input.
+- After RUN_PYTHON, inspect the Observation. If the output already answers the user request, immediately call COMPLETE(message) on the next step.
+- Do not keep writing/rewriting files after a successful run that already satisfies the request.
+- When the task is finished and you are ready to respond to the user, call COMPLETE(message).
+- After a successful run/output that satisfies the request, prefer COMPLETE(message) as the next step.
+- Prefer minimal steps.
+
+Examples:
+Thought: Need a new file.
+Action: WRITE_FILE(main.py,print(3+9))
+
+Thought: Now execute it.
+Action: RUN_PYTHON(main.py)
+
+Thought: Observation shows the requested answer, so finish now.
+Action: COMPLETE(Wrote and ran main.py. Output was 12.)
+
+Thought: Done.
+Action: COMPLETE(Added code and ran it.)
+
+Current workspace snapshot (authoritative): ${snapshot}`
+        },
+        { role: "user", content: userText }
+      ];
+      let malformedCount = 0;
+      let blockedInvalidCompleteCount = 0;
+      let repeatedToolCallCount = 0;
+      let previousToolFingerprint = "";
+      let consecutiveNoProgress = 0;
+      let impliedPath = activePath || "main.py";
+      const requestLikelyNeedsWork = /\b(run|execute|read|write|edit|create|modify|update|add|implement|file|python|script|code)\b/i.test(userText);
+      const requestLikelyNeedsRun = /\b(run|execute|test)\b/i.test(userText);
+      let successfulNonCompleteTools = 0;
+      let successfulRunTools = 0;
+      let forceTerminated = false;
+      let lastAutoRecoverFingerprint = "";
+      let autoRecoverRepeatCount = 0;
+      let wrotePythonFile = false;
+      let lastRunPath = "";
+      let lastRunOutput = "";
+
+      const tryAutoRecoverWriteFromMalformed = async (rawText, reasonLabel) => {
+        const code = extractCodeBlock(rawText);
+        if (!code) return false;
+
+        const codeLooksLikeMeta = /(Action\s*:|Thought\s*:|Observation\s*:|Answer\s*:|COMPLETE\s*\()/i.test(code);
+        if (codeLooksLikeMeta) {
+          trace("agent-react:auto-recover-skipped-meta", { reasonLabel, preview: code.slice(0, 140) });
+          return false;
+        }
+
+        const path = extractLikelyPythonPath(rawText, impliedPath || "main.py");
+        const content = code.endsWith("\n") ? code : `${code}\n`;
+        const output = await runTool("write_file", { path, content });
+
+        let toolOk = true;
+        try {
+          const parsedOut = JSON.parse(output);
+          toolOk = parsedOut?.ok !== false;
+        } catch {}
+        if (!toolOk) return false;
+
+        impliedPath = path;
+        if (path.toLowerCase().endsWith(".py")) wrotePythonFile = true;
+        successfulNonCompleteTools += 1;
+        malformedCount = 0;
+        addMessage("tool", formatToolDisplay("write_file", { path, content }, output));
+
+        const fp = `${path}::${content}`;
+        if (fp === lastAutoRecoverFingerprint) autoRecoverRepeatCount += 1;
+        else autoRecoverRepeatCount = 1;
+        lastAutoRecoverFingerprint = fp;
+
+        let runAutoNote = "";
+        const pathLooksRunnable = path.toLowerCase().endsWith(".py");
+        const shouldAutoRun = pathLooksRunnable && (requestLikelyNeedsWork || requestLikelyNeedsRun || autoRecoverRepeatCount >= 2);
+        let runOut = "";
+        if (shouldAutoRun) {
+          const runOutput = await runTool("run_python", { path });
+          runOut = runOutput;
+          lastRunPath = path;
+          lastRunOutput = runOutput;
+          addMessage("tool", formatToolDisplay("run_python", { path }, runOutput));
+          successfulNonCompleteTools += 1;
+          try {
+            const parsedRun = JSON.parse(runOutput);
+            if (parsedRun?.ok !== false) successfulRunTools += 1;
+          } catch {}
+          runAutoNote = ` Auto-run result for ${path}: ${runOutput}.`;
+        }
+
+        messages.push({ role: "assistant", content: rawText || "" });
+        messages.push({
+          role: "user",
+          content: `Observation: Auto-recovered malformed ${reasonLabel} by extracting a code block and writing ${path}. Result: ${output}.${runAutoNote} Continue with valid ReAct format and finish via Action: COMPLETE(message) when done.`
+        });
+        trace("agent-react:auto-recover-write", { reasonLabel, path, bytes: content.length, output });
+
+        if (runOut && (requestLikelyNeedsRun || autoRecoverRepeatCount >= 2)) {
+          const finalMessage = summarizeRunResult(path, runOut);
+          trace("agent-react:auto-recover-finish", { reasonLabel, path, autoRecoverRepeatCount, finalMessage });
+          addMessage("assistant", finalMessage);
+          setStatus("Done.");
+          forceTerminated = true;
+        }
+
+        return true;
+      };
+
+      for (let step = 0; step < MAX_STEPS; step++) {
+        if (malformedCount >= 4 || blockedInvalidCompleteCount >= 4) {
+          const compacted = compactReactMessagesInPlace(messages, false);
+          if (compacted) {
+            trace("agent-react:messages-compacted", { step: step + 1, malformedCount, blockedInvalidCompleteCount, size: messages.length, force: false });
+          }
+        }
+
+        setStatus(`Thinking (${loadedModel || "model"}) step ${step + 1}/${MAX_STEPS}`);
+        trace("agent-react:step:request", {
+          step: step + 1,
+          maxSteps: MAX_STEPS,
+          messages
+        });
+        let completion;
+        try {
+          completion = await engine.chat.completions.create({
+            messages,
+            temperature: 0.2,
+            max_tokens: 512,
+          });
+        } catch (err) {
+          const msg = String(err?.message || err || "");
+          const isCtx = /ContextWindowSizeExceededError|context window size|Prompt tokens exceed context window/i.test(msg);
+          if (isCtx) {
+            const compacted = compactReactMessagesInPlace(messages, true);
+            trace("agent-react:context-window-recovery", { step: step + 1, compacted, size: messages.length, error: msg });
+            messages.push({
+              role: "user",
+              content: "Observation: History was compacted due context size. Continue from latest state and use strict ReAct format."
+            });
+            continue;
+          }
+          throw err;
+        }
+        trace("agent-react:step:response", { step: step + 1, completion });
+
+        const text = completion.choices?.[0]?.message?.content || "";
+        const hasThought = text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .some((line) => /^Thought:\s*/i.test(line));
+        const allowAutoRecoverWrite = successfulNonCompleteTools === 0;
+
+        if (!hasThought) {
+          if (allowAutoRecoverWrite && await tryAutoRecoverWriteFromMalformed(text, "missing-thought response")) {
+            if (forceTerminated) return;
+            continue;
+          }
+
+          const canRecoverByRun = wrotePythonFile && successfulRunTools === 0 && impliedPath && impliedPath.toLowerCase().endsWith(".py");
+          if (canRecoverByRun && malformedCount >= 2) {
+            const path = impliedPath;
+            const runOutput = await runTool("run_python", { path });
+            lastRunPath = path;
+            lastRunOutput = runOutput;
+            addMessage("tool", formatToolDisplay("run_python", { path }, runOutput));
+            let runOk = true;
+            try {
+              const parsedRun = JSON.parse(runOutput);
+              runOk = parsedRun?.ok !== false;
+            } catch {}
+            if (runOk) {
+              successfulNonCompleteTools += 1;
+              successfulRunTools += 1;
+              const finalMessage = summarizeRunResult(path, runOutput);
+              trace("agent-react:malformed-loop-recovery-finish", {
+                step: step + 1,
+                malformedCount,
+                path,
+                finalMessage
+              });
+              addMessage("assistant", finalMessage);
+              setStatus("Done.");
+              return;
+            }
+            messages.push({ role: "assistant", content: text || "" });
+            messages.push({ role: "user", content: `Observation: Auto-run recovery failed for ${path}. Result: ${runOutput}. Continue with strict ReAct format.` });
+            malformedCount += 1;
+            trace("agent-react:malformed-loop-recovery-run-failed", {
+              step: step + 1,
+              malformedCount,
+              path,
+              runOutput
+            });
+            continue;
+          }
+
+          const canRecoverByFinalize = successfulRunTools > 0 && !!lastRunPath && !!lastRunOutput;
+          if (canRecoverByFinalize && malformedCount >= 3) {
+            const finalMessage = summarizeRunResult(lastRunPath, lastRunOutput);
+            trace("agent-react:malformed-loop-finalize", {
+              step: step + 1,
+              malformedCount,
+              lastRunPath,
+              finalMessage
+            });
+            addMessage("assistant", finalMessage);
+            setStatus("Done.");
+            return;
+          }
+
+          malformedCount += 1;
+          trace("agent-react:missing-thought", { step: step + 1, text, malformedCount });
+          messages.push({ role: "assistant", content: text || "" });
+          messages.push({
+            role: "user",
+            content: `Observation: Invalid format. Include a Thought line, then exactly one Action line in TOOL(args) format. Do not output Answer directly. Finish only via Action: COMPLETE(message). Keep retrying until valid. Attempt ${malformedCount}.`
+          });
+          continue;
+        }
+
+        const answer = extractAnswerFromReact(text);
+        if (answer) {
+          malformedCount += 1;
+          trace("agent-react:blocked-direct-answer", { step: step + 1, answer, malformedCount });
+          messages.push({ role: "assistant", content: text || "" });
+          messages.push({
+            role: "user",
+            content: `Observation: Invalid format. Do not end with Answer directly. Use Action: COMPLETE(message) when done. Keep retrying until valid. Attempt ${malformedCount}.`
+          });
+          continue;
+        }
+
+        const actionLine = text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find((line) => /^Action:\s*/i.test(line)) || "";
+        const actionSpec = actionLine.replace(/^Action:\s*/i, "").trim();
+        const parsed = parseToolCallResponse(actionSpec, impliedPath);
+
+        if (!parsed || !parsed.tool) {
+          if (allowAutoRecoverWrite && await tryAutoRecoverWriteFromMalformed(text, "malformed-action response")) {
+            if (forceTerminated) return;
+            continue;
+          }
+
+          malformedCount += 1;
+          trace("agent-react:malformed-action", { step: step + 1, text, malformedCount });
+          messages.push({ role: "assistant", content: text || "" });
+          messages.push({
+            role: "user",
+            content: `Observation: Invalid format. Respond with exactly one Action line in TOOL(args) form. If finished, use Action: COMPLETE(message). Keep retrying until valid. Attempt ${malformedCount}.`
+          });
+          continue;
+        }
+        malformedCount = 0;
+
+        const toolNameRaw = String(parsed.tool || "").toLowerCase();
+        const toolArgsRaw = parsed.args && typeof parsed.args === "object" ? parsed.args : {};
+        const normalizedToolName = normalizeToolName(toolNameRaw, toolArgsRaw);
+        const normalized = normalizeToolCallForWorkspace(normalizedToolName, toolArgsRaw);
+        const toolName = normalized.toolName;
+        const toolArgs = normalized.toolArgs;
+
+        if (toolName === "complete") {
+          const proposedMessage = String(firstString(toolArgs.message, toolArgs.summary, toolArgs.final) || "").trim();
+          const looksLikeFormatError = /invalid format|please try again|retry|malformed|error/i.test(proposedMessage);
+          const prematureComplete = requestLikelyNeedsWork && successfulNonCompleteTools === 0;
+          const missingRequiredRun = requestLikelyNeedsWork && wrotePythonFile && successfulRunTools === 0;
+          if (looksLikeFormatError || prematureComplete || missingRequiredRun) {
+            malformedCount += 1;
+            blockedInvalidCompleteCount += 1;
+            const reason = looksLikeFormatError
+              ? "COMPLETE message is a format/retry error, not a task result"
+              : (prematureComplete
+                  ? "COMPLETE called before doing any tool work"
+                  : "COMPLETE called before running written Python file");
+            const correction = `Observation: Invalid completion (${reason}). Continue solving the original user request. Use WRITE_FILE/RUN_PYTHON as needed, then Action: COMPLETE(real result). Keep retrying until valid. Attempt ${malformedCount}.`;
+            trace("agent-react:blocked-invalid-complete", { step: step + 1, proposedMessage, malformedCount, reason });
+
+            if (blockedInvalidCompleteCount >= 6) {
+              addMessage("assistant", "I stopped after repeated invalid completion loops.");
+              setStatus("Stalled without progress.");
+              trace("agent-react:stalled-invalid-complete-loop", { step: step + 1, blockedInvalidCompleteCount });
+              return;
+            }
+
+            messages.push({ role: "assistant", content: text || "" });
+            messages.push({ role: "user", content: correction });
+            continue;
+          }
+        }
+        blockedInvalidCompleteCount = 0;
+
+        const beforeDigest = workspaceDigest();
+        trace("agent-react:tool-call", { step: step + 1, toolName, toolArgs });
+        const output = await runTool(toolName, toolArgs);
+        const afterDigest = workspaceDigest();
+
+        let toolOk = true;
+        let toolError = "";
+        try {
+          const outParsed = JSON.parse(output);
+          toolOk = outParsed?.ok !== false;
+          toolError = String(outParsed?.error || "");
+        } catch {}
+
+        if (toolOk) {
+          const p = resolvePathArg(toolArgs);
+          if (p && (toolName === "read_file" || toolName === "write_file" || toolName === "run_python")) {
+            impliedPath = p;
+          }
+          if (toolName === "write_file" && p && p.toLowerCase().endsWith(".py")) {
+            wrotePythonFile = true;
+          }
+          if (toolName !== "complete") successfulNonCompleteTools += 1;
+          if (toolName === "run_python") successfulRunTools += 1;
+          if (toolName === "run_python") {
+            lastRunPath = resolvePathArg(toolArgs) || impliedPath || lastRunPath;
+            lastRunOutput = output;
+          }
+        }
+
+        addMessage("tool", formatToolDisplay(toolName, toolArgs, output));
+        const observation = toolOk ? output : `ERROR: ${toolError || output}`;
+        messages.push({ role: "assistant", content: text || "" });
+        messages.push({ role: "user", content: `Observation: ${observation}` });
+        trace("agent-react:observation-appended", { step: step + 1, toolName, toolOk, observation });
+
+        const changedWorkspace = beforeDigest !== afterDigest;
+        const wasProgress = toolOk && (changedWorkspace || toolName === "run_python");
+        if (wasProgress) consecutiveNoProgress = 0;
+        else consecutiveNoProgress += 1;
+
+        const fingerprint = `${toolName}::${JSON.stringify(toolArgs)}::${output}`;
+        if (fingerprint === previousToolFingerprint) repeatedToolCallCount += 1;
+        else repeatedToolCallCount = 1;
+        previousToolFingerprint = fingerprint;
+
+        const repeatedWriteStall = toolName === "write_file" && repeatedToolCallCount >= 3 && consecutiveNoProgress >= 2;
+        if (repeatedWriteStall) {
+          const repeatedPath = resolvePathArg(toolArgs) || impliedPath || "main.py";
+          const repeatedPathIsPython = String(repeatedPath).toLowerCase().endsWith(".py");
+          if (repeatedPathIsPython) {
+            const runOutput = await runTool("run_python", { path: repeatedPath });
+            lastRunPath = repeatedPath;
+            lastRunOutput = runOutput;
+            addMessage("tool", formatToolDisplay("run_python", { path: repeatedPath }, runOutput));
+            let runOk = true;
+            try {
+              const parsedRun = JSON.parse(runOutput);
+              runOk = parsedRun?.ok !== false;
+            } catch {}
+            if (runOk) {
+              successfulNonCompleteTools += 1;
+              successfulRunTools += 1;
+              const finalMessage = summarizeRunResult(repeatedPath, runOutput);
+              trace("agent-react:stalled-write-recovery-finish", {
+                step: step + 1,
+                repeatedToolCallCount,
+                consecutiveNoProgress,
+                repeatedPath,
+                finalMessage
+              });
+              addMessage("assistant", finalMessage);
+              setStatus("Done.");
+              return;
+            }
+            messages.push({ role: "user", content: `Observation: repeated write recovery run failed for ${repeatedPath}. Result: ${runOutput}` });
+            trace("agent-react:stalled-write-recovery-run-failed", {
+              step: step + 1,
+              repeatedToolCallCount,
+              consecutiveNoProgress,
+              repeatedPath,
+              runOutput
+            });
+          }
+        }
+
+        if (toolName === "complete") {
+          let finalMessage = "Done.";
+          try {
+            const parsedOutput = JSON.parse(output);
+            finalMessage = String(parsedOutput.message || toolArgs.message || "Done.");
+          } catch {
+            finalMessage = String(toolArgs.message || "Done.");
+          }
+          trace("agent-react:completed", { step: step + 1, finalMessage });
+          addMessage("assistant", finalMessage);
+          setStatus("Done.");
+          return;
+        }
+
+        if (repeatedToolCallCount >= 5 || consecutiveNoProgress >= JSON_MODE_STALL_LIMIT) {
+          addMessage("assistant", "I stopped after getting stuck without progress.");
+          setStatus("Stalled without progress.");
+          trace("agent-react:stalled-stop", { step: step + 1, repeatedToolCallCount, consecutiveNoProgress });
+          return;
+        }
+      }
+      trace("agent-react:stopped", { reason: "max-steps", maxSteps: MAX_STEPS });
+      addMessage("assistant", "Stopped after max tool/reasoning steps.");
+      setStatus("Step limit reached.");
+    }
+
+    async function initEngine() {
+      try {
+        trace("engine:init:start", { model: MODEL });
+        setBusy(true);
+        setStatus(`Loading ${MODEL}...`);
+        engine = await webllm.CreateMLCEngine(MODEL, {
+          initProgressCallback: (p) => setStatus(p.text || "Loading...")
+        });
+        loadedModel = MODEL;
+        trace("engine:init:ready", { model: MODEL });
+        setStatus(`Model ready: ${MODEL}`);
+        el.send.disabled = false;
+      } catch (err) {
+        trace("engine:init:error", err);
+        setStatus(`Model load failed: ${err?.message || err}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    el.newFile.onclick = () => {
+      const path = normalizePath(prompt("New file path", "src/new_file.py") || "");
+      if (!path) return;
+      if (!files.has(path)) files.set(path, "");
+      renderTree();
+      openFile(path);
+    };
+
+    el.saveFile.onclick = () => {
+      if (!activePath) return;
+      files.set(activePath, editor.getValue());
+      setStatus(`Saved ${activePath}`);
+      renderTree();
+    };
+
+    el.runFile.onclick = async () => {
+      if (!activePath || runBusy) return;
+      if (!activePath.toLowerCase().endsWith(".py")) {
+        setStatus("Run supports Python files (.py) only.");
+        return;
+      }
+
+      files.set(activePath, editor.getValue());
+      runBusy = true;
+      setStatus(`Running ${activePath}...`);
+      trace("ui:run-file", { path: activePath });
+      try {
+        const output = await runTool("run_python", { path: activePath });
+        setRunOutput(activePath, output);
+        setStatus(`Finished running ${activePath}.`);
+      } catch (err) {
+        trace("ui:run-file:error", err);
+        el.runOutput.textContent = `Error: ${err?.message || err}`;
+        setStatus("Run failed.");
+      } finally {
+        runBusy = false;
+      }
+    };
+
+    el.deleteFile.onclick = () => {
+      if (!activePath) return;
+      if (!confirm(`Delete ${activePath}?`)) return;
+      files.delete(activePath);
+      activePath = null;
+      editor.setValue("", -1);
+      el.editorPath.textContent = "No file selected";
+      el.saveFile.disabled = true;
+      el.deleteFile.disabled = true;
+      renderTree();
+    };
+
+    el.form.onsubmit = async (e) => {
+      e.preventDefault();
+      const text = el.prompt.value.trim();
+      if (!text || !engine || busy) return;
+      el.prompt.value = "";
+      trace("ui:submit", { text });
+      addMessage("user", text);
+      setBusy(true);
+      try {
+        await runAgent(text);
+      } catch (err) {
+        trace("ui:submit:error", err);
+        addMessage("assistant", `Error: ${err?.message || err}`);
+        setStatus("Agent error.");
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    renderTree();
+    editor.setValue("", -1);
+    el.editorPath.textContent = "No file selected";
+    el.saveFile.disabled = true;
+    el.deleteFile.disabled = true;
+    trace("app:init", { files: [...files.keys()] });
+    trace("app:note", "Only model-visible output can be logged; hidden internal model reasoning is not exposed by WebLLM APIs.");
+    initEngine();
+  </script>
+</body>
+</html>
