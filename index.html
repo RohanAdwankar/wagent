@@ -837,6 +837,7 @@ Behavior requirements:
 - Do not keep writing/rewriting files after a successful run that already satisfies the request.
 - When the task is finished and you are ready to respond to the user, call COMPLETE(message).
 - After a successful run/output that satisfies the request, prefer COMPLETE(message) as the next step.
+- When writing python do not use the os library and do not write files, prefer to solve the problem with minimal file creation.
 - Prefer minimal steps.
 
 Examples:
