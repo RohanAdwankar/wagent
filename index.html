@@ -71,6 +71,34 @@
     const REACT_COMPACT_TRIGGER_MESSAGES = 28;
     const REACT_COMPACT_KEEP_TAIL = 14;
     const REACT_COMPACT_KEEP_TAIL_FORCE = 10;
+    const TOOL_CALL_NAMES = ["list_files", "read_file", "write_file", "run_python", "complete"];
+    const REACT_TOOL_CALL_SCHEMA = JSON.stringify({
+      type: "object",
+      additionalProperties: false,
+      required: ["thought", "action"],
+      properties: {
+        thought: { type: "string" },
+        action: {
+          type: "object",
+          additionalProperties: false,
+          required: ["tool", "args"],
+          properties: {
+            tool: { type: "string", enum: TOOL_CALL_NAMES },
+            args: {
+              type: "object",
+              additionalProperties: true,
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+                code: { type: "string" },
+                command: { type: "string" },
+                message: { type: "string" }
+              }
+            }
+          }
+        }
+      }
+    });
 
     const el = {
       tree: document.getElementById("tree"),
@@ -563,6 +591,24 @@
       return "";
     }
 
+    function parseStructuredToolStep(text) {
+      const parsed = extractJsonObject(text);
+      if (!parsed || typeof parsed !== "object") return null;
+
+      const thought = typeof parsed.thought === "string" ? parsed.thought.trim() : "";
+      const action = parsed.action && typeof parsed.action === "object" ? parsed.action : null;
+      if (!thought || !action) return null;
+
+      const tool = String(action.tool || "").trim();
+      if (!TOOL_CALL_NAMES.includes(tool)) return null;
+
+      const args = action.args && typeof action.args === "object" && !Array.isArray(action.args)
+        ? action.args
+        : {};
+
+      return { thought, action: { tool, args } };
+    }
+
 
     function ensurePyodideDir(py, dirPath) {
       const parts = String(dirPath || "").split("/").filter(Boolean);
@@ -804,53 +850,26 @@
         {
           role: "system",
           content:
-            `You are wagent, a ReAct coding agent. Follow this loop strictly:
-Thought: <brief reasoning>
-Action: <TOOL(args)>
-After any Action, wait for Observation and continue.
-Do not output JSON.
-Do not output multiple Action lines.
-On every step, include a Thought line that considers the latest Observation and decides whether to continue or finish.
-When finished, end by calling Action: COMPLETE(message).
+            `You are wagent, a coding agent that MUST output one JSON object per step.
+Your output is schema-constrained and must include:
+- thought: short reasoning about the latest observation
+- action: { tool, args }
 
-Available tools:
-- LIST_FILES(path?)
-- READ_FILE(path)
-- WRITE_FILE(path,content)  (single file tool; create new file by writing a new path; overwrite if path exists)
-- WRITE_FILE(content)  (writes to current/last path)
-- RUN_PYTHON(path_or_code)
-- COMPLETE(message)
+Tool names (exact, lowercase): ${TOOL_CALL_NAMES.join(", ")}.
 
 Behavior requirements:
-- For coding requests, create/update files with WRITE_FILE, and run with RUN_PYTHON when execution is requested.
-- If no files exist, create a new .py file using WRITE_FILE(main.py,<content>) before running.
-- If you WRITE_FILE a Python file (.py), your next action should usually be RUN_PYTHON on that file before COMPLETE.
-- Prefer non-interactive scripts; avoid input() unless the user explicitly asks for interactive input.
-- After RUN_PYTHON, inspect the Observation. If the output already answers the user request, immediately call COMPLETE(message) on the next step.
-- Do not keep writing/rewriting files after a successful run that already satisfies the request.
-- When the task is finished and you are ready to respond to the user, call COMPLETE(message).
-- After a successful run/output that satisfies the request, prefer COMPLETE(message) as the next step.
-- When writing python do not use the os library and do not write files, prefer to solve the problem with minimal file creation.
-- Prefer minimal steps.
-
-Examples:
-Thought: Need a new file.
-Action: WRITE_FILE(main.py,print(3+9))
-
-Thought: Now execute it.
-Action: RUN_PYTHON(main.py)
-
-Thought: Observation shows the requested answer, so finish now.
-Action: COMPLETE(Wrote and ran main.py. Output was 12.)
-
-Thought: Done.
-Action: COMPLETE(Added code and ran it.)
+- Continue tool-use loop until task is complete, then call tool "complete" with args.message.
+- For coding requests, use write_file/read_file/list_files as needed.
+- If you write a Python file (.py), run it with run_python before completing when execution is relevant.
+- Prefer non-interactive scripts unless user requests interactivity.
+- Prefer minimal steps; do not rewrite files repeatedly after successful output already satisfies request.
+- Keep thought concise.
 
 Current workspace snapshot (authoritative): ${snapshot}`
         },
         { role: "user", content: userText }
       ];
-      let malformedCount = 0;
+      let structuredErrorCount = 0;
       let blockedInvalidCompleteCount = 0;
       let repeatedToolCallCount = 0;
       let previousToolFingerprint = "";
@@ -860,86 +879,15 @@ Current workspace snapshot (authoritative): ${snapshot}`
       const requestLikelyNeedsRun = /\b(run|execute|test)\b/i.test(userText);
       let successfulNonCompleteTools = 0;
       let successfulRunTools = 0;
-      let forceTerminated = false;
-      let lastAutoRecoverFingerprint = "";
-      let autoRecoverRepeatCount = 0;
       let wrotePythonFile = false;
       let lastRunPath = "";
       let lastRunOutput = "";
 
-      const tryAutoRecoverWriteFromMalformed = async (rawText, reasonLabel) => {
-        const code = extractCodeBlock(rawText);
-        if (!code) return false;
-
-        const codeLooksLikeMeta = /(Action\s*:|Thought\s*:|Observation\s*:|Answer\s*:|COMPLETE\s*\()/i.test(code);
-        if (codeLooksLikeMeta) {
-          trace("agent-react:auto-recover-skipped-meta", { reasonLabel, preview: code.slice(0, 140) });
-          return false;
-        }
-
-        const path = extractLikelyPythonPath(rawText, impliedPath || "main.py");
-        const content = code.endsWith("\n") ? code : `${code}\n`;
-        const output = await runTool("write_file", { path, content });
-
-        let toolOk = true;
-        try {
-          const parsedOut = JSON.parse(output);
-          toolOk = parsedOut?.ok !== false;
-        } catch {}
-        if (!toolOk) return false;
-
-        impliedPath = path;
-        if (path.toLowerCase().endsWith(".py")) wrotePythonFile = true;
-        successfulNonCompleteTools += 1;
-        malformedCount = 0;
-        addMessage("tool", formatToolDisplay("write_file", { path, content }, output));
-
-        const fp = `${path}::${content}`;
-        if (fp === lastAutoRecoverFingerprint) autoRecoverRepeatCount += 1;
-        else autoRecoverRepeatCount = 1;
-        lastAutoRecoverFingerprint = fp;
-
-        let runAutoNote = "";
-        const pathLooksRunnable = path.toLowerCase().endsWith(".py");
-        const shouldAutoRun = pathLooksRunnable && (requestLikelyNeedsWork || requestLikelyNeedsRun || autoRecoverRepeatCount >= 2);
-        let runOut = "";
-        if (shouldAutoRun) {
-          const runOutput = await runTool("run_python", { path });
-          runOut = runOutput;
-          lastRunPath = path;
-          lastRunOutput = runOutput;
-          addMessage("tool", formatToolDisplay("run_python", { path }, runOutput));
-          successfulNonCompleteTools += 1;
-          try {
-            const parsedRun = JSON.parse(runOutput);
-            if (parsedRun?.ok !== false) successfulRunTools += 1;
-          } catch {}
-          runAutoNote = ` Auto-run result for ${path}: ${runOutput}.`;
-        }
-
-        messages.push({ role: "assistant", content: rawText || "" });
-        messages.push({
-          role: "user",
-          content: `Observation: Auto-recovered malformed ${reasonLabel} by extracting a code block and writing ${path}. Result: ${output}.${runAutoNote} Continue with valid ReAct format and finish via Action: COMPLETE(message) when done.`
-        });
-        trace("agent-react:auto-recover-write", { reasonLabel, path, bytes: content.length, output });
-
-        if (runOut && (requestLikelyNeedsRun || autoRecoverRepeatCount >= 2)) {
-          const finalMessage = summarizeRunResult(path, runOut);
-          trace("agent-react:auto-recover-finish", { reasonLabel, path, autoRecoverRepeatCount, finalMessage });
-          addMessage("assistant", finalMessage);
-          setStatus("Done.");
-          forceTerminated = true;
-        }
-
-        return true;
-      };
-
       for (let step = 0; step < MAX_STEPS; step++) {
-        if (malformedCount >= 4 || blockedInvalidCompleteCount >= 4) {
+        if (structuredErrorCount >= JSON_MODE_MAX_REPAIR || blockedInvalidCompleteCount >= 4) {
           const compacted = compactReactMessagesInPlace(messages, false);
           if (compacted) {
-            trace("agent-react:messages-compacted", { step: step + 1, malformedCount, blockedInvalidCompleteCount, size: messages.length, force: false });
+            trace("agent-react:messages-compacted", { step: step + 1, structuredErrorCount, blockedInvalidCompleteCount, size: messages.length, force: false });
           }
         }
 
@@ -955,6 +903,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
             messages,
             temperature: 0.2,
             max_tokens: 512,
+            response_format: { type: "json_object", schema: REACT_TOOL_CALL_SCHEMA },
           });
         } catch (err) {
           const msg = String(err?.message || err || "");
@@ -964,7 +913,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
             trace("agent-react:context-window-recovery", { step: step + 1, compacted, size: messages.length, error: msg });
             messages.push({
               role: "user",
-              content: "Observation: History was compacted due context size. Continue from latest state and use strict ReAct format."
+              content: "Observation: History was compacted due context size. Continue from latest state and keep returning schema-valid JSON."
             });
             continue;
           }
@@ -973,115 +922,31 @@ Current workspace snapshot (authoritative): ${snapshot}`
         trace("agent-react:step:response", { step: step + 1, completion });
 
         const text = completion.choices?.[0]?.message?.content || "";
-        const hasThought = text
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .some((line) => /^Thought:\s*/i.test(line));
-        const allowAutoRecoverWrite = successfulNonCompleteTools === 0;
+        const structuredStep = parseStructuredToolStep(text);
+        if (!structuredStep) {
+          structuredErrorCount += 1;
+          trace("agent-react:malformed-structured-output", { step: step + 1, text, structuredErrorCount });
+          messages.push({ role: "assistant", content: text || "" });
+          messages.push({
+            role: "user",
+            content: `Observation: Output was not valid against the required JSON schema. Return one JSON object with thought and action(tool,args). Retry ${structuredErrorCount}.`
+          });
 
-        if (!hasThought) {
-          if (allowAutoRecoverWrite && await tryAutoRecoverWriteFromMalformed(text, "missing-thought response")) {
-            if (forceTerminated) return;
-            continue;
-          }
-
-          const canRecoverByRun = wrotePythonFile && successfulRunTools === 0 && impliedPath && impliedPath.toLowerCase().endsWith(".py");
-          if (canRecoverByRun && malformedCount >= 2) {
-            const path = impliedPath;
-            const runOutput = await runTool("run_python", { path });
-            lastRunPath = path;
-            lastRunOutput = runOutput;
-            addMessage("tool", formatToolDisplay("run_python", { path }, runOutput));
-            let runOk = true;
-            try {
-              const parsedRun = JSON.parse(runOutput);
-              runOk = parsedRun?.ok !== false;
-            } catch {}
-            if (runOk) {
-              successfulNonCompleteTools += 1;
-              successfulRunTools += 1;
-              const finalMessage = summarizeRunResult(path, runOutput);
-              trace("agent-react:malformed-loop-recovery-finish", {
-                step: step + 1,
-                malformedCount,
-                path,
-                finalMessage
-              });
-              addMessage("assistant", finalMessage);
-              setStatus("Done.");
-              return;
-            }
-            messages.push({ role: "assistant", content: text || "" });
-            messages.push({ role: "user", content: `Observation: Auto-run recovery failed for ${path}. Result: ${runOutput}. Continue with strict ReAct format.` });
-            malformedCount += 1;
-            trace("agent-react:malformed-loop-recovery-run-failed", {
-              step: step + 1,
-              malformedCount,
-              path,
-              runOutput
-            });
-            continue;
-          }
-
-          const canRecoverByFinalize = successfulRunTools > 0 && !!lastRunPath && !!lastRunOutput;
-          if (canRecoverByFinalize && malformedCount >= 3) {
-            const finalMessage = summarizeRunResult(lastRunPath, lastRunOutput);
-            trace("agent-react:malformed-loop-finalize", {
-              step: step + 1,
-              malformedCount,
-              lastRunPath,
-              finalMessage
-            });
-            addMessage("assistant", finalMessage);
-            setStatus("Done.");
+          if (structuredErrorCount >= JSON_MODE_MAX_REPAIR * 3) {
+            addMessage("assistant", "I stopped after repeated invalid structured outputs.");
+            setStatus("Structured output stalled.");
+            trace("agent-react:structured-stop", { step: step + 1, structuredErrorCount });
             return;
           }
-
-          malformedCount += 1;
-          trace("agent-react:missing-thought", { step: step + 1, text, malformedCount });
-          messages.push({ role: "assistant", content: text || "" });
-          messages.push({
-            role: "user",
-            content: `Observation: Invalid format. Include a Thought line, then exactly one Action line in TOOL(args) format. Do not output Answer directly. Finish only via Action: COMPLETE(message). Keep retrying until valid. Attempt ${malformedCount}.`
-          });
           continue;
         }
+        structuredErrorCount = 0;
 
-        const answer = extractAnswerFromReact(text);
-        if (answer) {
-          malformedCount += 1;
-          trace("agent-react:blocked-direct-answer", { step: step + 1, answer, malformedCount });
-          messages.push({ role: "assistant", content: text || "" });
-          messages.push({
-            role: "user",
-            content: `Observation: Invalid format. Do not end with Answer directly. Use Action: COMPLETE(message) when done. Keep retrying until valid. Attempt ${malformedCount}.`
-          });
-          continue;
-        }
-
-        const actionLine = text
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .find((line) => /^Action:\s*/i.test(line)) || "";
-        const actionSpec = actionLine.replace(/^Action:\s*/i, "").trim();
-        const parsed = parseToolCallResponse(actionSpec, impliedPath);
-
-        if (!parsed || !parsed.tool) {
-          if (allowAutoRecoverWrite && await tryAutoRecoverWriteFromMalformed(text, "malformed-action response")) {
-            if (forceTerminated) return;
-            continue;
-          }
-
-          malformedCount += 1;
-          trace("agent-react:malformed-action", { step: step + 1, text, malformedCount });
-          messages.push({ role: "assistant", content: text || "" });
-          messages.push({
-            role: "user",
-            content: `Observation: Invalid format. Respond with exactly one Action line in TOOL(args) form. If finished, use Action: COMPLETE(message). Keep retrying until valid. Attempt ${malformedCount}.`
-          });
-          continue;
-        }
-        malformedCount = 0;
+        const thought = structuredStep.thought;
+        const parsed = {
+          tool: structuredStep.action.tool,
+          args: structuredStep.action.args
+        };
 
         const toolNameRaw = String(parsed.tool || "").toLowerCase();
         const toolArgsRaw = parsed.args && typeof parsed.args === "object" ? parsed.args : {};
@@ -1096,15 +961,15 @@ Current workspace snapshot (authoritative): ${snapshot}`
           const prematureComplete = requestLikelyNeedsWork && successfulNonCompleteTools === 0;
           const missingRequiredRun = requestLikelyNeedsWork && wrotePythonFile && successfulRunTools === 0;
           if (looksLikeFormatError || prematureComplete || missingRequiredRun) {
-            malformedCount += 1;
+            structuredErrorCount += 1;
             blockedInvalidCompleteCount += 1;
             const reason = looksLikeFormatError
               ? "COMPLETE message is a format/retry error, not a task result"
               : (prematureComplete
                   ? "COMPLETE called before doing any tool work"
                   : "COMPLETE called before running written Python file");
-            const correction = `Observation: Invalid completion (${reason}). Continue solving the original user request. Use WRITE_FILE/RUN_PYTHON as needed, then Action: COMPLETE(real result). Keep retrying until valid. Attempt ${malformedCount}.`;
-            trace("agent-react:blocked-invalid-complete", { step: step + 1, proposedMessage, malformedCount, reason });
+            const correction = `Observation: Invalid completion (${reason}). Continue solving the request and return schema-valid JSON for the next action. Attempt ${structuredErrorCount}.`;
+            trace("agent-react:blocked-invalid-complete", { step: step + 1, proposedMessage, structuredErrorCount, reason });
 
             if (blockedInvalidCompleteCount >= 6) {
               addMessage("assistant", "I stopped after repeated invalid completion loops.");
@@ -1113,7 +978,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
               return;
             }
 
-            messages.push({ role: "assistant", content: text || "" });
+            messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
             messages.push({ role: "user", content: correction });
             continue;
           }
@@ -1151,9 +1016,9 @@ Current workspace snapshot (authoritative): ${snapshot}`
 
         addMessage("tool", formatToolDisplay(toolName, toolArgs, output));
         const observation = toolOk ? output : `ERROR: ${toolError || output}`;
-        messages.push({ role: "assistant", content: text || "" });
-        messages.push({ role: "user", content: `Observation: ${observation}` });
-        trace("agent-react:observation-appended", { step: step + 1, toolName, toolOk, observation });
+          messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
+          messages.push({ role: "user", content: `Observation: ${observation}` });
+          trace("agent-react:observation-appended", { step: step + 1, thought, toolName, toolOk, observation });
 
         const changedWorkspace = beforeDigest !== afterDigest;
         const wasProgress = toolOk && (changedWorkspace || toolName === "run_python");
@@ -1164,46 +1029,6 @@ Current workspace snapshot (authoritative): ${snapshot}`
         if (fingerprint === previousToolFingerprint) repeatedToolCallCount += 1;
         else repeatedToolCallCount = 1;
         previousToolFingerprint = fingerprint;
-
-        const repeatedWriteStall = toolName === "write_file" && repeatedToolCallCount >= 3 && consecutiveNoProgress >= 2;
-        if (repeatedWriteStall) {
-          const repeatedPath = resolvePathArg(toolArgs) || impliedPath || "main.py";
-          const repeatedPathIsPython = String(repeatedPath).toLowerCase().endsWith(".py");
-          if (repeatedPathIsPython) {
-            const runOutput = await runTool("run_python", { path: repeatedPath });
-            lastRunPath = repeatedPath;
-            lastRunOutput = runOutput;
-            addMessage("tool", formatToolDisplay("run_python", { path: repeatedPath }, runOutput));
-            let runOk = true;
-            try {
-              const parsedRun = JSON.parse(runOutput);
-              runOk = parsedRun?.ok !== false;
-            } catch {}
-            if (runOk) {
-              successfulNonCompleteTools += 1;
-              successfulRunTools += 1;
-              const finalMessage = summarizeRunResult(repeatedPath, runOutput);
-              trace("agent-react:stalled-write-recovery-finish", {
-                step: step + 1,
-                repeatedToolCallCount,
-                consecutiveNoProgress,
-                repeatedPath,
-                finalMessage
-              });
-              addMessage("assistant", finalMessage);
-              setStatus("Done.");
-              return;
-            }
-            messages.push({ role: "user", content: `Observation: repeated write recovery run failed for ${repeatedPath}. Result: ${runOutput}` });
-            trace("agent-react:stalled-write-recovery-run-failed", {
-              step: step + 1,
-              repeatedToolCallCount,
-              consecutiveNoProgress,
-              repeatedPath,
-              runOutput
-            });
-          }
-        }
 
         if (toolName === "complete") {
           let finalMessage = "Done.";
