@@ -18,7 +18,7 @@
     #editor-path,#status,#run-output-header{font-size:12px;color:var(--muted)}#editor-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     #run-output-shell{border-top:1px solid var(--line);max-height:180px}#run-output{margin:0;padding:8px 10px;font-size:12px;line-height:1.35;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--panel2);color:var(--text)}
     #chat-messages{flex:1;padding:10px;display:flex;flex-direction:column;gap:10px}
-    .msg{padding:9px 10px;border:1px solid var(--line);background:var(--panel2);white-space:pre-wrap;word-break:break-word}.msg.user{border-color:#2e3f69;background:#162038}.msg.tool{border-color:#3c345e;background:#211a36;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .msg{padding:9px 10px;border:1px solid var(--line);background:var(--panel2);white-space:pre-wrap;word-break:break-word}.msg.user{border-color:#2e3f69;background:#162038}.msg.tool{border-color:#3c345e;background:#211a36;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.msg.reasoning{border-color:#4a4a2e;background:#232316;color:#d9d59a}
     #chat-form{border-top:1px solid var(--line);padding:10px;display:grid;grid-template-columns:1fr auto;gap:8px}#prompt{min-height:82px;max-height:180px;resize:vertical;padding:10px}#status{padding:0 10px 8px}
   </style>
 
@@ -71,7 +71,8 @@
     const REACT_COMPACT_TRIGGER_MESSAGES = 28;
     const REACT_COMPACT_KEEP_TAIL = 14;
     const REACT_COMPACT_KEEP_TAIL_FORCE = 10;
-    const TOOL_CALL_NAMES = ["list_files", "read_file", "write_file", "run_python", "complete"];
+    const TOOL_CALL_NAMES = ["read_file", "write_file", "run_python", "complete"];
+    const CONVERSATION_HISTORY_LIMIT = 24;
     const REACT_TOOL_CALL_SCHEMA = JSON.stringify({
       type: "object",
       additionalProperties: false,
@@ -123,6 +124,7 @@
     let busy = false;
     let runBusy = false;
     let loadedModel = null;
+    const conversationHistory = [];
 
     function trace(label, data) {
       const ts = new Date().toISOString();
@@ -139,6 +141,20 @@
     function setBusy(state) {
       busy = state;
       el.send.disabled = state || !engine;
+    }
+
+    function pushConversationMessage(role, content) {
+      if (role !== "user" && role !== "assistant") return;
+      const text = String(content || "").trim();
+      if (!text) return;
+      conversationHistory.push({ role, content: text });
+      if (conversationHistory.length > CONVERSATION_HISTORY_LIMIT) {
+        conversationHistory.splice(0, conversationHistory.length - CONVERSATION_HISTORY_LIMIT);
+      }
+    }
+
+    function getConversationHistoryForModel() {
+      return conversationHistory.map((m) => ({ role: m.role, content: m.content }));
     }
 
     function normalizePath(path) {
@@ -223,6 +239,16 @@
       return JSON.stringify({ files: entries });
     }
 
+    function workspaceFileListText() {
+      const paths = [...files.keys()].sort((a, b) => a.localeCompare(b));
+      if (!paths.length) return "- (no files)";
+      return paths.map((p) => `- ${p}`).join("\n");
+    }
+
+    function withWorkspaceFilesContext(text) {
+      return `${String(text || "").trim()}\n\nWorkspace files:\n${workspaceFileListText()}`;
+    }
+
     function firstString(...vals) {
       for (const v of vals) {
         if (typeof v === "string" && v.trim()) return v;
@@ -236,7 +262,7 @@
 
     function normalizeToolName(rawName, args = {}) {
       const name = String(rawName || "").trim();
-      const allowed = new Set(["list_files", "read_file", "write_file", "run_python", "complete"]);
+      const allowed = new Set(["read_file", "write_file", "run_python", "complete"]);
       if (allowed.has(name)) return name;
 
       if (/create[_\s-]?file/i.test(name) && resolvePathArg(args)) return "write_file";
@@ -260,9 +286,6 @@
       const args = rawArgs && typeof rawArgs === "object" ? rawArgs : {};
       const path = resolvePathArg(args);
 
-      if (toolName === "list_files") {
-        return { path: normalizePath(firstString(args.path, args.dir, args.directory, args.input_file)) };
-      }
       if (toolName === "read_file") {
         return { path };
       }
@@ -456,7 +479,6 @@
 
     function mapSimpleToolName(rawName) {
       const n = String(rawName || "").trim().toLowerCase();
-      if (n === "list_files" || n === "list") return "list_files";
       if (n === "read_file" || n === "read") return "read_file";
       if (n === "create_file" || n === "create") return "write_file";
       if (n === "write_file" || n === "write") return "write_file";
@@ -484,9 +506,6 @@
       const first = stripWrappingQuotes(argsList[0] || "");
       const restJoined = stripWrappingQuotes(argsList.slice(1).join(",").trim());
 
-      if (mappedTool === "list_files") {
-        return { tool: "list_files", args: { path: normalizePath(first) } };
-      }
       if (mappedTool === "read_file") {
         return { tool: "read_file", args: { path: normalizePath(first || defaultPath) } };
       }
@@ -652,17 +671,6 @@
     async function runTool(name, args) {
       trace("tool:call", { name, args });
       try {
-        if (name === "list_files") {
-          const path = normalizePath(firstString(args.path, args.dir, args.directory, args.input_file));
-          if (path && files.has(path)) {
-            const result = JSON.stringify({ ok: true, entries: [{ name: path.split("/").pop(), path, type: "file" }] });
-            trace("tool:result", { name, result });
-            return result;
-          }
-          const result = JSON.stringify({ ok: true, entries: listDir(path) });
-          trace("tool:result", { name, result });
-          return result;
-        }
         if (name === "read_file") {
           const path = resolvePathArg(args);
           if (!files.has(path)) {
@@ -776,6 +784,8 @@
 
     async function runAgent(userText) {
       trace("agent:start", { userText, model: loadedModel, mode: "react-tool-mode" });
+      const priorHistory = getConversationHistoryForModel();
+      pushConversationMessage("user", userText);
 
       const runTarget = detectRunTarget(userText);
       if (runTarget) {
@@ -785,12 +795,13 @@
         addMessage("tool", formatToolDisplay("run_python", { path }, output));
         const summary = summarizeRunResult(path, output);
         addMessage("assistant", summary);
+        pushConversationMessage("assistant", summary);
         setStatus("Done.");
         return;
       }
 
       trace("agent:dispatch", "Using ReAct tool mode");
-      return runAgentReactToolMode(userText);
+      return runAgentReactToolMode(userText, priorHistory);
     }
 
     function extractJsonObject(text) {
@@ -843,9 +854,10 @@
       return null;
     }
 
-    async function runAgentReactToolMode(userText) {
+    async function runAgentReactToolMode(userText, priorHistory = []) {
       trace("agent-react:start", { userText, model: loadedModel });
       const snapshot = workspaceSnapshot();
+      const userTurnWithFiles = withWorkspaceFilesContext(userText);
       const messages = [
         {
           role: "system",
@@ -859,15 +871,19 @@ Tool names (exact, lowercase): ${TOOL_CALL_NAMES.join(", ")}.
 
 Behavior requirements:
 - Continue tool-use loop until task is complete, then call tool "complete" with args.message.
-- For coding requests, use write_file/read_file/list_files as needed.
+- If the user asks a general question that does not require file/tool operations, call "complete" immediately with the answer.
+- For coding requests, use write_file/read_file as needed.
 - If you write a Python file (.py), run it with run_python before completing when execution is relevant.
 - Prefer non-interactive scripts unless user requests interactivity.
 - Prefer minimal steps; do not rewrite files repeatedly after successful output already satisfies request.
 - Keep thought concise.
 
+You receive current workspace files in every user/observation message, so do not call any file-listing tool.
+
 Current workspace snapshot (authoritative): ${snapshot}`
         },
-        { role: "user", content: userText }
+  ...priorHistory,
+  { role: "user", content: userTurnWithFiles }
       ];
       let structuredErrorCount = 0;
       let blockedInvalidCompleteCount = 0;
@@ -913,7 +929,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
             trace("agent-react:context-window-recovery", { step: step + 1, compacted, size: messages.length, error: msg });
             messages.push({
               role: "user",
-              content: "Observation: History was compacted due context size. Continue from latest state and keep returning schema-valid JSON."
+              content: withWorkspaceFilesContext("Observation: History was compacted due context size. Continue from latest state and keep returning schema-valid JSON.")
             });
             continue;
           }
@@ -929,11 +945,12 @@ Current workspace snapshot (authoritative): ${snapshot}`
           messages.push({ role: "assistant", content: text || "" });
           messages.push({
             role: "user",
-            content: `Observation: Output was not valid against the required JSON schema. Return one JSON object with thought and action(tool,args). Retry ${structuredErrorCount}.`
+            content: withWorkspaceFilesContext(`Observation: Output was not valid against the required JSON schema. Return one JSON object with thought and action(tool,args). Retry ${structuredErrorCount}.`)
           });
 
           if (structuredErrorCount >= JSON_MODE_MAX_REPAIR * 3) {
             addMessage("assistant", "I stopped after repeated invalid structured outputs.");
+            pushConversationMessage("assistant", "I stopped after repeated invalid structured outputs.");
             setStatus("Structured output stalled.");
             trace("agent-react:structured-stop", { step: step + 1, structuredErrorCount });
             return;
@@ -943,6 +960,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
         structuredErrorCount = 0;
 
         const thought = structuredStep.thought;
+        addMessage("reasoning", thought);
         const parsed = {
           tool: structuredStep.action.tool,
           args: structuredStep.action.args
@@ -958,28 +976,26 @@ Current workspace snapshot (authoritative): ${snapshot}`
         if (toolName === "complete") {
           const proposedMessage = String(firstString(toolArgs.message, toolArgs.summary, toolArgs.final) || "").trim();
           const looksLikeFormatError = /invalid format|please try again|retry|malformed|error/i.test(proposedMessage);
-          const prematureComplete = requestLikelyNeedsWork && successfulNonCompleteTools === 0;
           const missingRequiredRun = requestLikelyNeedsWork && wrotePythonFile && successfulRunTools === 0;
-          if (looksLikeFormatError || prematureComplete || missingRequiredRun) {
+          if (looksLikeFormatError || missingRequiredRun) {
             structuredErrorCount += 1;
             blockedInvalidCompleteCount += 1;
             const reason = looksLikeFormatError
               ? "COMPLETE message is a format/retry error, not a task result"
-              : (prematureComplete
-                  ? "COMPLETE called before doing any tool work"
-                  : "COMPLETE called before running written Python file");
+              : "COMPLETE called before running written Python file";
             const correction = `Observation: Invalid completion (${reason}). Continue solving the request and return schema-valid JSON for the next action. Attempt ${structuredErrorCount}.`;
             trace("agent-react:blocked-invalid-complete", { step: step + 1, proposedMessage, structuredErrorCount, reason });
 
             if (blockedInvalidCompleteCount >= 6) {
               addMessage("assistant", "I stopped after repeated invalid completion loops.");
+              pushConversationMessage("assistant", "I stopped after repeated invalid completion loops.");
               setStatus("Stalled without progress.");
               trace("agent-react:stalled-invalid-complete-loop", { step: step + 1, blockedInvalidCompleteCount });
               return;
             }
 
             messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
-            messages.push({ role: "user", content: correction });
+            messages.push({ role: "user", content: withWorkspaceFilesContext(correction) });
             continue;
           }
         }
@@ -1017,7 +1033,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
         addMessage("tool", formatToolDisplay(toolName, toolArgs, output));
         const observation = toolOk ? output : `ERROR: ${toolError || output}`;
           messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
-          messages.push({ role: "user", content: `Observation: ${observation}` });
+        messages.push({ role: "user", content: withWorkspaceFilesContext(`Observation: ${observation}`) });
           trace("agent-react:observation-appended", { step: step + 1, thought, toolName, toolOk, observation });
 
         const changedWorkspace = beforeDigest !== afterDigest;
@@ -1040,12 +1056,14 @@ Current workspace snapshot (authoritative): ${snapshot}`
           }
           trace("agent-react:completed", { step: step + 1, finalMessage });
           addMessage("assistant", finalMessage);
+          pushConversationMessage("assistant", finalMessage);
           setStatus("Done.");
           return;
         }
 
         if (repeatedToolCallCount >= 5 || consecutiveNoProgress >= JSON_MODE_STALL_LIMIT) {
           addMessage("assistant", "I stopped after getting stuck without progress.");
+          pushConversationMessage("assistant", "I stopped after getting stuck without progress.");
           setStatus("Stalled without progress.");
           trace("agent-react:stalled-stop", { step: step + 1, repeatedToolCallCount, consecutiveNoProgress });
           return;
@@ -1053,6 +1071,7 @@ Current workspace snapshot (authoritative): ${snapshot}`
       }
       trace("agent-react:stopped", { reason: "max-steps", maxSteps: MAX_STEPS });
       addMessage("assistant", "Stopped after max tool/reasoning steps.");
+      pushConversationMessage("assistant", "Stopped after max tool/reasoning steps.");
       setStatus("Step limit reached.");
     }
 
@@ -1139,7 +1158,9 @@ Current workspace snapshot (authoritative): ${snapshot}`
         await runAgent(text);
       } catch (err) {
         trace("ui:submit:error", err);
-        addMessage("assistant", `Error: ${err?.message || err}`);
+        const errorMessage = `Error: ${err?.message || err}`;
+        addMessage("assistant", errorMessage);
+        pushConversationMessage("assistant", errorMessage);
         setStatus("Agent error.");
       } finally {
         setBusy(false);
