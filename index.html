@@ -408,6 +408,13 @@
       return "";
     }
 
+    function requestNeedsScriptCreation(userText) {
+      const text = String(userText || "").trim();
+      const asksCreate = /\b(write|create|make|generate|build)\b/i.test(text);
+      const asksScript = /\b(python|script|file|program)\b/i.test(text);
+      return asksCreate && asksScript;
+    }
+
 
     function stripWrappingQuotes(value) {
       const s = String(value || "").trim();
@@ -873,12 +880,29 @@ Behavior requirements:
 - Continue tool-use loop until task is complete, then call tool "complete" with args.message.
 - If the user asks a general question that does not require file/tool operations, call "complete" immediately with the answer.
 - For coding requests, use write_file/read_file as needed.
+- If the workspace has no files and the user asks to write code, create a new file with write_file (for Python use main.py unless user specifies another path).
 - If you write a Python file (.py), run it with run_python before completing when execution is relevant.
+- For requests like "write/create a python script", follow this exact order:
+  1) write_file(path, non-empty python content)
+  2) run_python(path)
+  3) complete(message with result)
+- Do not call complete before step 2 for script-creation requests.
+- Do not write empty file content for script-creation requests.
+- After writing a script, prefer run_python over additional write_file/read_file loops unless fixing an execution error.
 - Prefer non-interactive scripts unless user requests interactivity.
 - Prefer minimal steps; do not rewrite files repeatedly after successful output already satisfies request.
 - Keep thought concise.
 
 You receive current workspace files in every user/observation message, so do not call any file-listing tool.
+Never refuse with "no workspace files" or similar when the user asks to create/write code; create the file instead.
+
+Example (schema-shaped intent):
+- thought: "Need to create script first"
+  action: {"tool":"write_file","args":{"path":"main.py","content":"print(234*243 > 34234234)\n"}}
+- thought: "Now run the script"
+  action: {"tool":"run_python","args":{"path":"main.py"}}
+- thought: "Output confirms result"
+  action: {"tool":"complete","args":{"message":"Created and ran main.py. Result was False."}}
 
 Current workspace snapshot (authoritative): ${snapshot}`
         },
@@ -893,9 +917,12 @@ Current workspace snapshot (authoritative): ${snapshot}`
       let impliedPath = activePath || "main.py";
       const requestLikelyNeedsWork = /\b(run|execute|read|write|edit|create|modify|update|add|implement|file|python|script|code)\b/i.test(userText);
       const requestLikelyNeedsRun = /\b(run|execute|test)\b/i.test(userText);
+      const requestNeedsCreateScript = requestNeedsScriptCreation(userText);
       let successfulNonCompleteTools = 0;
       let successfulRunTools = 0;
+      let successfulWriteTools = 0;
       let wrotePythonFile = false;
+      let lastWrittenPythonPath = "";
       let lastRunPath = "";
       let lastRunOutput = "";
 
@@ -973,17 +1000,70 @@ Current workspace snapshot (authoritative): ${snapshot}`
         const toolName = normalized.toolName;
         const toolArgs = normalized.toolArgs;
 
+        if (toolName === "read_file") {
+          const readPath = resolvePathArg(toolArgs);
+          const emptyWorkspace = files.size === 0;
+          if (!readPath || (emptyWorkspace && requestLikelyNeedsWork && !files.has(readPath))) {
+            structuredErrorCount += 1;
+            const correction = !readPath
+              ? `Observation: Invalid read_file call. args.path is required. If user asked for coding work, use write_file to create a file first.`
+              : `Observation: Workspace is empty and ${readPath} does not exist. For coding requests, create a file first with write_file (for python prefer main.py), then continue.`;
+            trace("agent-react:blocked-invalid-read-file", { step: step + 1, readPath, emptyWorkspace, structuredErrorCount });
+            messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
+            messages.push({ role: "user", content: withWorkspaceFilesContext(correction) });
+            continue;
+          }
+        }
+
+        if (toolName === "run_python") {
+          const hasPath = !!resolvePathArg(toolArgs);
+          const hasCode = typeof toolArgs.code === "string" && toolArgs.code.trim().length > 0;
+          const hasCommand = typeof toolArgs.command === "string" && toolArgs.command.trim().length > 0;
+          if (!hasPath && !hasCode && !hasCommand) {
+            structuredErrorCount += 1;
+            const correction = "Observation: Invalid run_python call. It requires args.path, args.code, or args.command. For script requests, use write_file to create main.py first, then run_python with that path.";
+            trace("agent-react:blocked-invalid-run-python", { step: step + 1, structuredErrorCount });
+            messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
+            messages.push({ role: "user", content: withWorkspaceFilesContext(correction) });
+            continue;
+          }
+        }
+
+        if (toolName === "write_file" && requestNeedsCreateScript) {
+          const writePath = resolvePathArg(toolArgs);
+          const writeContent = String(toolArgs.content || "");
+          if (!writePath || !writePath.toLowerCase().endsWith(".py") || !writeContent.trim()) {
+            structuredErrorCount += 1;
+            const correction = "Observation: Invalid write_file for script request. Use a .py path and non-empty Python content. Next action must be write_file with real script code.";
+            trace("agent-react:blocked-invalid-write-file", { step: step + 1, writePath, bytes: writeContent.length, structuredErrorCount });
+            messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
+            messages.push({ role: "user", content: withWorkspaceFilesContext(correction) });
+            continue;
+          }
+        }
+
         if (toolName === "complete") {
           const proposedMessage = String(firstString(toolArgs.message, toolArgs.summary, toolArgs.final) || "").trim();
           const looksLikeFormatError = /invalid format|please try again|retry|malformed|error/i.test(proposedMessage);
+          const looksLikeWorkspaceRefusal = /no\s+workspace\s+files|workspace\s+is\s+empty|files\s+provided/i.test(proposedMessage);
+          const missingRequiredWrite = requestNeedsCreateScript && successfulWriteTools === 0;
           const missingRequiredRun = requestLikelyNeedsWork && wrotePythonFile && successfulRunTools === 0;
-          if (looksLikeFormatError || missingRequiredRun) {
+          if (looksLikeFormatError || (requestLikelyNeedsWork && looksLikeWorkspaceRefusal) || missingRequiredWrite || missingRequiredRun) {
             structuredErrorCount += 1;
             blockedInvalidCompleteCount += 1;
             const reason = looksLikeFormatError
               ? "COMPLETE message is a format/retry error, not a task result"
-              : "COMPLETE called before running written Python file";
-            const correction = `Observation: Invalid completion (${reason}). Continue solving the request and return schema-valid JSON for the next action. Attempt ${structuredErrorCount}.`;
+              : ((requestLikelyNeedsWork && looksLikeWorkspaceRefusal)
+                  ? "COMPLETE message refused due missing files, but user asked for coding work"
+                  : (missingRequiredWrite
+                      ? "COMPLETE called before creating requested script/file"
+                      : "COMPLETE called before running written Python file"));
+            const nextStepHint = missingRequiredWrite
+              ? " Next action must be write_file for a .py file with non-empty code."
+              : (missingRequiredRun
+                  ? " Next action must be run_python on the .py file you wrote; do not call complete yet."
+                  : "");
+            const correction = `Observation: Invalid completion (${reason}). Continue solving the request and return schema-valid JSON for the next action. Attempt ${structuredErrorCount}.${nextStepHint}`;
             trace("agent-react:blocked-invalid-complete", { step: step + 1, proposedMessage, structuredErrorCount, reason });
 
             if (blockedInvalidCompleteCount >= 6) {
@@ -1021,6 +1101,10 @@ Current workspace snapshot (authoritative): ${snapshot}`
           }
           if (toolName === "write_file" && p && p.toLowerCase().endsWith(".py")) {
             wrotePythonFile = true;
+            lastWrittenPythonPath = p;
+          }
+          if (toolName === "write_file") {
+            successfulWriteTools += 1;
           }
           if (toolName !== "complete") successfulNonCompleteTools += 1;
           if (toolName === "run_python") successfulRunTools += 1;
@@ -1030,7 +1114,9 @@ Current workspace snapshot (authoritative): ${snapshot}`
           }
         }
 
-        addMessage("tool", formatToolDisplay(toolName, toolArgs, output));
+        if (toolName !== "complete") {
+          addMessage("tool", formatToolDisplay(toolName, toolArgs, output));
+        }
         const observation = toolOk ? output : `ERROR: ${toolError || output}`;
           messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
         messages.push({ role: "user", content: withWorkspaceFilesContext(`Observation: ${observation}`) });
@@ -1045,6 +1131,37 @@ Current workspace snapshot (authoritative): ${snapshot}`
         if (fingerprint === previousToolFingerprint) repeatedToolCallCount += 1;
         else repeatedToolCallCount = 1;
         previousToolFingerprint = fingerprint;
+
+        const shouldAutoRecoverRun =
+          requestNeedsCreateScript &&
+          wrotePythonFile &&
+          successfulRunTools === 0 &&
+          !!lastWrittenPythonPath &&
+          blockedInvalidCompleteCount >= 3;
+        if (shouldAutoRecoverRun) {
+          const autoRunPath = lastWrittenPythonPath;
+          const autoRunOutput = await runTool("run_python", { path: autoRunPath });
+          addMessage("tool", formatToolDisplay("run_python", { path: autoRunPath }, autoRunOutput));
+          let autoRunOk = true;
+          try {
+            const parsedAuto = JSON.parse(autoRunOutput);
+            autoRunOk = parsedAuto?.ok !== false;
+          } catch {}
+          if (autoRunOk) {
+            successfulRunTools += 1;
+            const finalMessage = summarizeRunResult(autoRunPath, autoRunOutput);
+            addMessage("assistant", finalMessage);
+            pushConversationMessage("assistant", finalMessage);
+            setStatus("Done.");
+            trace("agent-react:auto-recover-run-complete", { step: step + 1, autoRunPath, finalMessage });
+            return;
+          }
+          messages.push({ role: "assistant", content: JSON.stringify(structuredStep) });
+          messages.push({
+            role: "user",
+            content: withWorkspaceFilesContext(`Observation: Auto-recovery run failed for ${autoRunPath}: ${autoRunOutput}. Continue with schema-valid next action.`)
+          });
+        }
 
         if (toolName === "complete") {
           let finalMessage = "Done.";
