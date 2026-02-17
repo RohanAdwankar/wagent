@@ -368,6 +368,15 @@
       if (name === "run_python") {
         return formatRunPythonToolDisplay(args || {}, output);
       }
+      if (name === "write_file") {
+        try {
+          const parsed = JSON.parse(output);
+          const path = String(parsed?.path || resolvePathArg(args || {}));
+          if (parsed?.ok && path) return `Created ${path}`;
+        } catch {}
+        const path = resolvePathArg(args || {}) || "(unknown path)";
+        return `write_file(${path})\n${output}`;
+      }
       return `${name}(${JSON.stringify(args || {})})\n${output}`;
     }
 
